@@ -1,6 +1,31 @@
-/**
- * @file layout.c
- * @brief Typesetting, full justification, and pagination engine implementation.
+/* rr - Lightweight terminal EPUB reader
+ *
+ * Copyright (c) 2024, Usbo Kirishima <usbo at github>
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ *   * Redistributions of source code must retain the above copyright notice,
+ *     this list of conditions and the following disclaimer.
+ *   * Redistributions in binary form must reproduce the above copyright
+ *     notice, this list of conditions and the following disclaimer in the
+ *     documentation and/or other materials provided with the distribution.
+ *   * Neither the name of the copyright holder nor the names of its
+ *     contributors may be used to endorse or promote products derived from
+ *     this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #ifndef _XOPEN_SOURCE
@@ -17,6 +42,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ==========================================================================
+ * Low-level line constructors
+ *
+ * Functions in this section append typed lines to a ChapterLayout's line array.
+ * Memory for lines is managed with exponential growth reallocation.
+ * ========================================================================== */
+
+/* Append a blank vertical spacing line to the chapter layout. */
 static void add_blank_line(ChapterLayout *cl, int block_idx, const char *title) {
     if (cl->line_count >= cl->line_cap) {
         cl->line_cap = cl->line_cap ? cl->line_cap * 2 : 128;
@@ -29,6 +62,7 @@ static void add_blank_line(ChapterLayout *cl, int block_idx, const char *title) 
     line->section_title = title;
 }
 
+/* Append a centered horizontal divider rule to the chapter layout. */
 static void add_hr_line(ChapterLayout *cl, int col_width, int block_idx, const char *title) {
     if (cl->line_count >= cl->line_cap) {
         cl->line_cap = cl->line_cap ? cl->line_cap * 2 : 128;
@@ -43,6 +77,28 @@ static void add_hr_line(ChapterLayout *cl, int col_width, int block_idx, const c
     line->section_title = title;
 }
 
+/* Typeset a slice of words into a single line with optional full justification.
+ *
+ * Full Justification Mathematics:
+ *   When full justification is enabled, the surplus column whitespace
+ *   (col_width - sum_of_word_widths - indent) must be distributed across
+ *   the (count - 1) inter-word gaps.
+ *
+ *   Each gap receives a base number of spaces:
+ *     base_spaces = total_space_needed / gaps
+ *
+ *   The remainder (total_space_needed % gaps) represents extra single spaces
+ *   that cannot be distributed equally. If we always distributed these extra
+ *   spaces from the left, text would develop an uneven, left-heavy density.
+ *   Furthermore, when adjacent lines distribute remainders on the same side,
+ *   they create vertical white alleys ("rivers").
+ *
+ *   To counteract this, rr alternates remainder distribution direction:
+ *     - Even lines distribute extra spaces from left to right.
+ *     - Odd lines distribute extra spaces from right to left.
+ *
+ *   Paragraph termination lines, single-word lines, and headings are never
+ *   stretched; they receive standard single spaces (ragged right). */
 static void add_typeset_line(ChapterLayout *cl, Word *words, int count, int indent,
                              int col_width, bool full_justify, bool is_last_line,
                              bool is_heading, int h_level, bool is_centered,
@@ -67,12 +123,13 @@ static void add_typeset_line(ChapterLayout *cl, Word *words, int count, int inde
     line->section_title = title;
     line->anchor_id = anchor;
 
+    /* Allocate exact spacing array for this line */
     line->spaces_after = (int *)xmalloc(count * sizeof(int));
     for (int i = 0; i < count; i++) {
         line->spaces_after[i] = 0;
     }
 
-    /* Compute sum of word widths */
+    /* Compute cumulative visual width of all words on this line */
     int words_width = 0;
     for (int i = 0; i < count; i++) {
         words_width += words[i].visual_width;
@@ -80,22 +137,24 @@ static void add_typeset_line(ChapterLayout *cl, Word *words, int count, int inde
 
     int gaps = count - 1;
 
-    /* Full justification logic */
+    /* Determine whether to justify this line */
     bool do_justify = full_justify && !is_last_line && !is_heading && !is_centered && (gaps > 0);
     int total_space_needed = col_width - words_width - indent;
 
-    /* Avoid excessive gap stretching if line is too sparse */
+    /* Safeguard against extreme space stretching if a line is sparsely filled */
     if (do_justify && total_space_needed >= gaps && (total_space_needed - gaps) <= (col_width / 2)) {
         int base_space = total_space_needed / gaps;
         int rem = total_space_needed % gaps;
 
-        /* Alternate remainder distribution on even/odd lines to prevent vertical whitespace rivers */
+        /* Alternating remainder distribution across odd/even lines */
         bool even_line = (cl->line_count % 2 == 0);
         for (int i = 0; i < gaps; i++) {
             int extra = 0;
             if (even_line) {
+                /* Distribute extra spaces from left to right */
                 extra = (i < rem) ? 1 : 0;
             } else {
+                /* Distribute extra spaces from right to left */
                 extra = (i >= (gaps - rem)) ? 1 : 0;
             }
             line->spaces_after[i] = base_space + extra;
@@ -114,11 +173,19 @@ static void add_typeset_line(ChapterLayout *cl, Word *words, int count, int inde
     }
 }
 
+/* ==========================================================================
+ * Block typesetting and word wrapping
+ *
+ * Iterates through semantic blocks, applies paragraph formatting rules
+ * (classic first-line indent vs modern spaced lines), wraps words at column
+ * boundaries, and attaches TOC section titles.
+ * ========================================================================== */
+
 static void layout_chapter_blocks(ChapterLayout *cl, ChapterDocument *doc, const EpubBook *book,
                                   int col_width, bool full_justify, int paragraph_style) {
     const char *current_section_title = doc->title;
 
-    /* Check if there is an anchor-less TOC entry for this chapter */
+    /* Check if an unanchored TOC entry exists for this chapter */
     if (book) {
         for (size_t t = 0; t < book->toc_count; t++) {
             if (book->toc[t].spine_index == (int)cl->chapter_index && !book->toc[t].anchor) {
@@ -133,7 +200,7 @@ static void layout_chapter_blocks(ChapterLayout *cl, ChapterDocument *doc, const
     for (size_t b_idx = 0; b_idx < doc->block_count; b_idx++) {
         Block *b = &doc->blocks[b_idx];
 
-        /* Match block anchor against TOC entries */
+        /* If this block matches a specific TOC anchor, update active section title */
         if (b->anchor_id && book) {
             for (size_t t = 0; t < book->toc_count; t++) {
                 if (book->toc[t].spine_index == (int)cl->chapter_index &&
@@ -149,6 +216,7 @@ static void layout_chapter_blocks(ChapterLayout *cl, ChapterDocument *doc, const
             current_section_title = b->section_title;
         }
 
+        /* --- Case 1: Thematic Break (<hr>) --- */
         if (b->type == BLOCK_HR) {
             if (cl->line_count > 0 && !cl->lines[cl->line_count - 1].is_blank) {
                 add_blank_line(cl, (int)b_idx, current_section_title);
@@ -160,8 +228,9 @@ static void layout_chapter_blocks(ChapterLayout *cl, ChapterDocument *doc, const
 
         if (b->word_count == 0) continue;
 
+        /* --- Case 2: Headings (<h1> - <h6>) --- */
         if (b->type == BLOCK_HEADING) {
-            /* Extra vertical space before headings */
+            /* Generous vertical whitespace preceding headings */
             if (cl->line_count > 0 && !cl->lines[cl->line_count - 1].is_blank) {
                 add_blank_line(cl, (int)b_idx, current_section_title);
                 if (b->heading_level <= 2) {
@@ -195,21 +264,21 @@ static void layout_chapter_blocks(ChapterLayout *cl, ChapterDocument *doc, const
                                  (int)b_idx, current_section_title, (start_w == 0) ? b->anchor_id : NULL);
             }
 
-            /* Blank line after heading */
+            /* Trailing blank line after heading */
             add_blank_line(cl, (int)b_idx, current_section_title);
             continue;
         }
 
-        /* Determine indentation and spacing for paragraphs and other blocks */
+        /* --- Case 3: Paragraphs, Blockquotes, and Lists --- */
         int first_line_indent = 0;
         int cont_line_indent = 0;
 
         if (b->type == BLOCK_PARAGRAPH) {
             if (paragraph_style == 0) {
-                /* Traditional book typography: 4 spaces indent, no blank line between paragraphs */
+                /* Traditional paperback typography: 4-space first-line indent, no blank lines */
                 first_line_indent = 4;
             } else {
-                /* Modern spaced paragraphs: blank line between paragraphs, no indent */
+                /* Modern digital typography: blank line separator, zero indent */
                 if (cl->line_count > 0 && !cl->lines[cl->line_count - 1].is_blank) {
                     add_blank_line(cl, (int)b_idx, current_section_title);
                 }
@@ -246,6 +315,7 @@ static void layout_chapter_blocks(ChapterLayout *cl, ChapterDocument *doc, const
             }
         }
 
+        /* Final line of paragraph (ragged right) */
         if ((size_t)start_w < b->word_count) {
             int count = (int)(b->word_count - start_w);
             int indent = (start_w == 0) ? first_line_indent : cont_line_indent;
@@ -256,12 +326,23 @@ static void layout_chapter_blocks(ChapterLayout *cl, ChapterDocument *doc, const
     }
 }
 
+/* ==========================================================================
+ * Screen pagination and orphan control
+ *
+ * Divides chapter lines into fixed-height screen pages.
+ * Enforces typographic aesthetics:
+ *   - Strips top-of-page blank lines so text starts cleanly under the header.
+ *   - Strips bottom-of-page blank lines.
+ *   - Prevents orphan headings: if a heading falls on the very last line of a
+ *     page without following body text, it is moved to the top of the next page.
+ * ========================================================================== */
+
 static void paginate_chapter(ChapterLayout *cl, int page_height) {
     if (page_height <= 0) page_height = 20;
 
     size_t line_idx = 0;
     while (line_idx < cl->line_count) {
-        /* Skip leading blank lines at the top of a page */
+        /* Discard leading blank lines at the top of a page */
         while (line_idx < cl->line_count && cl->lines[line_idx].is_blank) {
             line_idx++;
         }
@@ -275,7 +356,7 @@ static void paginate_chapter(ChapterLayout *cl, int page_height) {
             line_idx++;
         }
 
-        /* Prevent orphan heading stranded at the very bottom of a page */
+        /* Prevent orphan headings stranded at the bottom of a page */
         if (count > 1 && line_idx < cl->line_count) {
             size_t last_idx = start + count - 1;
             if (cl->lines[last_idx].is_heading) {
@@ -284,7 +365,7 @@ static void paginate_chapter(ChapterLayout *cl, int page_height) {
             }
         }
 
-        /* Skip trailing blank lines on page */
+        /* Strip trailing blank lines at bottom of page */
         while (count > 0 && cl->lines[start + count - 1].is_blank) {
             count--;
         }
@@ -303,13 +384,13 @@ static void paginate_chapter(ChapterLayout *cl, int page_height) {
         page->chapter_index = cl->chapter_index;
         page->page_in_chapter = cl->page_count;
 
-        /* Determine active section title for page header */
+        /* Section title for running header */
         const char *sec_title = cl->lines[start].section_title;
         if (!sec_title && cl->doc) sec_title = cl->doc->title;
         page->section_title = sec_title;
     }
 
-    /* Ensure at least 1 page even if chapter is empty */
+    /* Guarantee at least 1 page even if chapter is blank */
     if (cl->page_count == 0) {
         cl->pages = (LayoutPage *)xrealloc(cl->pages, sizeof(LayoutPage));
         LayoutPage *page = &cl->pages[0];
@@ -323,6 +404,14 @@ static void paginate_chapter(ChapterLayout *cl, int page_height) {
     }
 }
 
+/* ==========================================================================
+ * High-level layout construction and lookup
+ * ========================================================================== */
+
+/* Build the complete layout for an opened EPUB book.
+ *
+ * Loads each chapter's XHTML from the archive, parses semantic blocks,
+ * typesets lines, paginates screens, and constructs the global page lookup tables. */
 BookLayout *layout_build(EpubBook *book, int col_width, int page_height,
                          bool full_justify, int paragraph_style) {
     if (!book) return NULL;
@@ -339,6 +428,7 @@ BookLayout *layout_build(EpubBook *book, int col_width, int page_height,
 
     size_t total_pages = 0;
 
+    /* Format each spine chapter in reading order */
     for (size_t c = 0; c < book->spine_count; c++) {
         ChapterLayout *cl = &bl->chapters[c];
         cl->chapter_index = c;
@@ -365,6 +455,7 @@ BookLayout *layout_build(EpubBook *book, int col_width, int page_height,
     bl->total_pages = total_pages;
     if (bl->total_pages == 0) bl->total_pages = 1;
 
+    /* Build fast O(1) global-to-local page translation lookup tables */
     bl->page_to_chapter = (size_t *)xmalloc((bl->total_pages + 1) * sizeof(size_t));
     bl->page_to_local_page = (size_t *)xmalloc((bl->total_pages + 1) * sizeof(size_t));
 
@@ -382,6 +473,7 @@ BookLayout *layout_build(EpubBook *book, int col_width, int page_height,
     return bl;
 }
 
+/* Free all memory associated with a BookLayout. */
 void layout_free(BookLayout *layout) {
     if (!layout) return;
 
@@ -407,6 +499,7 @@ void layout_free(BookLayout *layout) {
     free(layout);
 }
 
+/* Resolve a 1-based global page index to its LayoutPage descriptor. */
 const LayoutPage *layout_get_page(const BookLayout *layout, size_t global_page) {
     if (!layout || global_page == 0 || global_page > layout->total_pages) return NULL;
     size_t c = layout->page_to_chapter[global_page];
@@ -415,6 +508,8 @@ const LayoutPage *layout_get_page(const BookLayout *layout, size_t global_page) 
     return &layout->chapters[c].pages[p];
 }
 
+/* Find the 1-based global page corresponding to a TOC entry.
+ * Resolves HTML anchor IDs to the exact page containing that line. */
 size_t layout_find_toc_page(const BookLayout *layout, const EpubTocItem *toc) {
     if (!layout || !toc) return 1;
 
@@ -426,11 +521,11 @@ size_t layout_find_toc_page(const BookLayout *layout, const EpubTocItem *toc) {
     const ChapterLayout *cl = &layout->chapters[spine_idx];
     if (cl->page_count == 0) return 1;
 
-    /* If anchor specified, search lines for matching anchor */
+    /* If anchor specified, search chapter lines for matching anchor ID */
     if (toc->anchor && *toc->anchor) {
         for (size_t l = 0; l < cl->line_count; l++) {
             if (cl->lines[l].anchor_id && strcmp(cl->lines[l].anchor_id, toc->anchor) == 0) {
-                /* Find which page contains this line */
+                /* Identify which page contains this line */
                 for (size_t p = 0; p < cl->page_count; p++) {
                     if (l >= cl->pages[p].start_line &&
                         l < (cl->pages[p].start_line + cl->pages[p].line_count)) {
@@ -441,10 +536,11 @@ size_t layout_find_toc_page(const BookLayout *layout, const EpubTocItem *toc) {
         }
     }
 
-    /* Fallback: first page of that chapter */
+    /* Fallback: first page of the chapter */
     return cl->pages[0].global_page;
 }
 
+/* Return the 1-based global page number of the first page of a chapter. */
 size_t layout_get_chapter_first_page(const BookLayout *layout, size_t chapter_index) {
     if (!layout || chapter_index >= layout->chapter_count) return 1;
     const ChapterLayout *cl = &layout->chapters[chapter_index];

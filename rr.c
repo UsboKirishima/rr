@@ -1,6 +1,31 @@
-/**
- * @file rr.c
- * @brief Lightweight aesthetic terminal EPUB reader entry point.
+/* rr - Lightweight terminal EPUB reader
+ *
+ * Copyright (c) 2024, Usbo Kirishima <usbo at github>
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ *   * Redistributions of source code must retain the above copyright notice,
+ *     this list of conditions and the following disclaimer.
+ *   * Redistributions in binary form must reproduce the above copyright
+ *     notice, this list of conditions and the following disclaimer in the
+ *     documentation and/or other materials provided with the distribution.
+ *   * Neither the name of the copyright holder nor the names of its
+ *     contributors may be used to endorse or promote products derived from
+ *     this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #ifndef _XOPEN_SOURCE
@@ -24,6 +49,11 @@
 
 #define RR_VERSION "1.0.0"
 
+/* ==========================================================================
+ * Command-line interface and usage
+ * ========================================================================== */
+
+/* Display usage information and available keybindings. */
 static void print_usage(const char *prog_name) {
     printf("rr - Lightweight aesthetic terminal EPUB reader (v%s)\n\n", RR_VERSION);
     printf("Usage:\n");
@@ -50,8 +80,21 @@ static void print_usage(const char *prog_name) {
     printf("  q / Esc                     Quit reader\n");
 }
 
+/* ==========================================================================
+ * Responsive layout management
+ *
+ * Recomputes column widths and pagination whenever terminal geometry or
+ * typography settings change (e.g. window resize or margin cycling).
+ * ========================================================================== */
+
+/* Rebuild the BookLayout structure to match current terminal dimensions.
+ *
+ * If `preferred_page` is valid, navigation jumps directly to it; otherwise,
+ * the reader preserves the reader's proportional progress through the book. */
 static void rebuild_ui_layout(UIState *ui, size_t preferred_page) {
     int col_w = ui->state->column_width;
+
+    /* Auto column width: center a 66-character paperback column, bounded by screen */
     if (col_w <= 0) {
         col_w = ui->term_w - 6;
         if (col_w > 66) col_w = 66;
@@ -62,6 +105,7 @@ static void rebuild_ui_layout(UIState *ui, size_t preferred_page) {
     int page_h = ui->term_h - 4;
     if (page_h < 4) page_h = 4;
 
+    /* Calculate proportional reading progress before tearing down layout */
     double ratio = 0.0;
     if (ui->layout && ui->layout->total_pages > 0) {
         ratio = (double)preferred_page / (double)ui->layout->total_pages;
@@ -74,6 +118,7 @@ static void rebuild_ui_layout(UIState *ui, size_t preferred_page) {
 
     ui->layout = layout_build(book, col_w, page_h, ui->state->full_justify, ui->state->paragraph_style);
 
+    /* Restore reading position */
     if (preferred_page > 0 && preferred_page <= ui->layout->total_pages) {
         ui->current_page = preferred_page;
     } else if (ratio > 0.0) {
@@ -85,6 +130,20 @@ static void rebuild_ui_layout(UIState *ui, size_t preferred_page) {
         ui->current_page = 1;
     }
 }
+
+/* ==========================================================================
+ * Main program entry point and event loop
+ *
+ * Lifecycle:
+ *   1. Parse CLI arguments.
+ *   2. Open and index EPUB container.
+ *   3. If '--info', display metadata and exit.
+ *   4. Load persistent reading state and bookmarks from disk.
+ *   5. Initialize curses terminal interface.
+ *   6. Build initial typeset layout.
+ *   7. Enter interactive event loop (keyboard and mouse navigation).
+ *   8. On exit, persist state and release all resources cleanly.
+ * ========================================================================== */
 
 int main(int argc, char **argv) {
     if (argc < 2) {
@@ -98,6 +157,7 @@ int main(int argc, char **argv) {
     int start_chapter = -1;
     bool info_only = false;
 
+    /* Parse command-line options */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
@@ -125,6 +185,7 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
+    /* Open EPUB publication */
     char *err_msg = NULL;
     EpubBook *book = epub_open(epub_path, &err_msg);
     if (!book) {
@@ -133,16 +194,17 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
+    /* Non-interactive info mode */
     if (info_only) {
         epub_print_info(book);
         epub_close(book);
         return EXIT_SUCCESS;
     }
 
-    /* Load saved session state */
+    /* Load persistent session state */
     BookState *state = state_load(book->file_id);
 
-    /* Initialize Curses UI */
+    /* Initialize terminal interface */
     if (!ui_init()) {
         fprintf(stderr, "ERROR: Failed to initialize terminal interface.\n");
         state_free(state);
@@ -155,7 +217,7 @@ int main(int argc, char **argv) {
     ui.state = state;
     getmaxyx(stdscr, ui.term_h, ui.term_w);
 
-    /* Build initial layout */
+    /* Build initial typeset layout */
     ui.layout = (BookLayout *)xcalloc(1, sizeof(BookLayout));
     ui.layout->book = book;
 
@@ -166,19 +228,23 @@ int main(int argc, char **argv) {
 
     rebuild_ui_layout(&ui, initial_page);
 
+    /* Direct jump to specific chapter if requested via -c */
     if (start_chapter > 0 && (size_t)start_chapter <= book->spine_count) {
         ui.current_page = layout_get_chapter_first_page(ui.layout, (size_t)(start_chapter - 1));
     }
 
     ui_set_theme(state->theme);
 
-    /* Interactive Event Loop */
+    /* ======================================================================
+     * Interactive event loop
+     * ====================================================================== */
     bool running = true;
     while (running) {
         ui_render(&ui);
 
         int ch = getch();
 
+        /* Fade temporary toast messages */
         if (ui.status_ticks > 0) {
             ui.status_ticks--;
             if (ui.status_ticks == 0) {
@@ -192,7 +258,7 @@ int main(int argc, char **argv) {
                 running = false;
                 break;
 
-            /* Next page */
+            /* Advance to next page */
             case KEY_RIGHT:
             case KEY_DOWN:
             case ' ':
@@ -208,7 +274,7 @@ int main(int argc, char **argv) {
                 }
                 break;
 
-            /* Previous page */
+            /* Return to previous page */
             case KEY_LEFT:
             case KEY_UP:
             case KEY_BACKSPACE:
@@ -224,7 +290,7 @@ int main(int argc, char **argv) {
                 }
                 break;
 
-            /* Next chapter */
+            /* Jump to next chapter */
             case ']': {
                 const LayoutPage *cur_lp = layout_get_page(ui.layout, ui.current_page);
                 if (cur_lp && cur_lp->chapter_index + 1 < ui.layout->chapter_count) {
@@ -234,7 +300,7 @@ int main(int argc, char **argv) {
                 break;
             }
 
-            /* Previous chapter */
+            /* Jump to previous chapter */
             case '[': {
                 const LayoutPage *cur_lp = layout_get_page(ui.layout, ui.current_page);
                 if (cur_lp) {
@@ -249,17 +315,18 @@ int main(int argc, char **argv) {
                 break;
             }
 
-            /* Home / End */
+            /* Jump to first page of publication */
             case KEY_HOME:
                 ui.current_page = 1;
                 break;
 
+            /* Jump to last page of publication */
             case KEY_END:
             case 'G':
                 ui.current_page = ui.layout->total_pages;
                 break;
 
-            /* Table of Contents */
+            /* Open Table of Contents modal */
             case 't':
             case '\t': {
                 size_t target = ui_show_toc_modal(&ui);
@@ -269,11 +336,12 @@ int main(int argc, char **argv) {
                 break;
             }
 
-            /* Search */
+            /* Prompt for full-book text search */
             case '/':
                 ui_prompt_search(&ui);
                 break;
 
+            /* Jump to next search match */
             case 'n':
                 if (ui.search_active) {
                     ui_search_next(&ui);
@@ -282,6 +350,7 @@ int main(int argc, char **argv) {
                 }
                 break;
 
+            /* Jump to previous search match */
             case 'N':
                 if (ui.search_active) {
                     ui_search_prev(&ui);
@@ -290,19 +359,21 @@ int main(int argc, char **argv) {
                 }
                 break;
 
+            /* Clear active search highlights */
             case 27: /* Escape */
                 if (ui.search_active) {
                     ui_search_clear(&ui);
                 }
                 break;
 
-            /* Bookmarks */
+            /* Toggle bookmark on current page */
             case 'b': {
                 bool added = state_toggle_bookmark(ui.state, ui.current_page);
                 ui_set_status(&ui, added ? "✓ Page %zu bookmarked" : "✗ Removed bookmark on page %zu", ui.current_page);
                 break;
             }
 
+            /* Open Bookmarks modal */
             case 'B': {
                 size_t bm_target = ui_show_bookmarks_modal(&ui);
                 if (bm_target > 0) {
@@ -311,7 +382,7 @@ int main(int argc, char **argv) {
                 break;
             }
 
-            /* Jump to page */
+            /* Jump directly to a page number */
             case 'g': {
                 size_t goto_p = ui_prompt_goto_page(&ui);
                 if (goto_p > 0) {
@@ -320,7 +391,7 @@ int main(int argc, char **argv) {
                 break;
             }
 
-            /* Cycle column width / margins */
+            /* Cycle text column width (margins) */
             case 'w':
             case 'W': {
                 int widths[] = {0, 50, 60, 66, 76, 86};
@@ -343,7 +414,7 @@ int main(int argc, char **argv) {
                 break;
             }
 
-            /* Toggle full justification */
+            /* Toggle full justification vs left-aligned ragged right */
             case 'F':
             case 'J': {
                 ui.state->full_justify = !ui.state->full_justify;
@@ -352,7 +423,7 @@ int main(int argc, char **argv) {
                 break;
             }
 
-            /* Toggle paragraph styling (indent vs blank line) */
+            /* Toggle paragraph styling (classic indent vs spaced blank lines) */
             case 'p':
             case 'P': {
                 ui.state->paragraph_style = (ui.state->paragraph_style == 0) ? 1 : 0;
@@ -371,21 +442,21 @@ int main(int argc, char **argv) {
                 break;
             }
 
-            /* Help overlay */
+            /* Open keyboard help cheatsheet */
             case '?':
             case KEY_F(1):
                 ui_show_help_modal(&ui);
                 break;
 
-            /* Mouse events */
+            /* Mouse wheel and click events */
             case KEY_MOUSE: {
                 MEVENT event;
                 if (getmouse(&event) == OK) {
                     if (event.bstate & BUTTON4_PRESSED) {
-                        /* Scroll up -> Previous page */
+                        /* Scroll wheel up: previous page */
                         if (ui.current_page > 1) ui.current_page--;
                     } else if (event.bstate & BUTTON5_PRESSED) {
-                        /* Scroll down -> Next page */
+                        /* Scroll wheel down: next page */
                         if (ui.current_page < ui.layout->total_pages) ui.current_page++;
                     } else if (event.bstate & BUTTON1_CLICKED) {
                         /* Click left half of terminal -> Prev, right half -> Next */
@@ -399,7 +470,7 @@ int main(int argc, char **argv) {
                 break;
             }
 
-            /* Window resized */
+            /* Terminal window resized (SIGWINCH) */
             case KEY_RESIZE:
                 getmaxyx(stdscr, ui.term_h, ui.term_w);
                 rebuild_ui_layout(&ui, ui.current_page);
@@ -410,7 +481,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Save reading position and preferences */
+    /* Save reading position and user preferences */
     ui.state->last_global_page = ui.current_page;
     state_save(ui.state);
 

@@ -1,6 +1,31 @@
-/**
- * @file html.c
- * @brief HTML/XHTML parser implementation for EPUB documents.
+/* rr - Lightweight terminal EPUB reader
+ *
+ * Copyright (c) 2024, Usbo Kirishima <usbo at github>
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ *   * Redistributions of source code must retain the above copyright notice,
+ *     this list of conditions and the following disclaimer.
+ *   * Redistributions in binary form must reproduce the above copyright
+ *     notice, this list of conditions and the following disclaimer in the
+ *     documentation and/or other materials provided with the distribution.
+ *   * Neither the name of the copyright holder nor the names of its
+ *     contributors may be used to endorse or promote products derived from
+ *     this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #ifndef _XOPEN_SOURCE
@@ -21,14 +46,28 @@
 #include <libxml/tree.h>
 #include <libxml/HTMLparser.h>
 
+/* ==========================================================================
+ * Parser internal state
+ *
+ * During recursive DOM traversal, this context structure tracks the active
+ * document, current block being accumulated, active style flags, and any
+ * HTML anchor ID waiting to attach to the next content block.
+ * ========================================================================== */
+
 typedef struct {
-    ChapterDocument *doc;
-    Block *current_block;
-    int current_style;
-    char *pending_anchor;
-    bool in_pre;
+    ChapterDocument *doc;    /* Document currently being populated */
+    Block *current_block;    /* Block currently receiving words */
+    int current_style;       /* Active bitmask of TextStyle flags */
+    char *pending_anchor;    /* Anchor ID encountered before text appeared */
+    bool in_pre;             /* True when inside <pre> preformatted block */
 } ParseContext;
 
+/* ==========================================================================
+ * Block and word constructors
+ * ========================================================================== */
+
+/* Allocate and append a new semantic block to the chapter document.
+ * Grows the blocks array with exponential reallocation. */
 static Block *create_block(ChapterDocument *doc, BlockType type, int heading_level, char *anchor) {
     if (doc->block_count >= doc->block_cap) {
         doc->block_cap = doc->block_cap ? doc->block_cap * 2 : 64;
@@ -46,6 +85,11 @@ static Block *create_block(ChapterDocument *doc, BlockType type, int heading_lev
     return b;
 }
 
+/* Append an indivisible word token to a block.
+ *
+ * Pre-computes the word's visual terminal width using `utf8_strwidth` so that
+ * the layout engine never needs to recalculate character widths during
+ * re-wrapping or page rendering. */
 static void add_word_to_block(Block *b, const char *text, int style, bool space_after) {
     if (!text || !*text) return;
 
@@ -61,17 +105,31 @@ static void add_word_to_block(Block *b, const char *text, int style, bool space_
     w->space_after = space_after;
 }
 
+/* ==========================================================================
+ * HTML whitespace collapsing
+ *
+ * In HTML typography, consecutive whitespace characters (spaces, tabs,
+ * newlines, carriage returns) are collapsed into a single space.
+ * Non-breaking spaces (U+00A0) are also treated as whitespace delimiters
+ * between tokens.
+ * ========================================================================== */
+
+/* Test if the byte sequence at `p` begins an HTML whitespace character.
+ *
+ * Checks ASCII whitespace (' ', '\t', '\n', '\r') as well as the 2-byte
+ * UTF-8 encoding of the non-breaking space (U+00A0: 0xC2 0xA0).
+ * If matched, stores the byte length of the whitespace token in `out_len`. */
 static bool is_html_whitespace(const char *p, size_t *out_len) {
     if (!p || !*p) {
         if (out_len) *out_len = 0;
         return false;
     }
-    /* Check standard ASCII whitespace */
+    /* Standard ASCII whitespace */
     if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
         if (out_len) *out_len = 1;
         return true;
     }
-    /* Check UTF-8 non-breaking space U+00A0: 0xC2 0xA0 */
+    /* UTF-8 non-breaking space U+00A0: 0xC2 0xA0 */
     if ((unsigned char)p[0] == 0xC2 && (unsigned char)p[1] == 0xA0) {
         if (out_len) *out_len = 2;
         return true;
@@ -80,9 +138,15 @@ static bool is_html_whitespace(const char *p, size_t *out_len) {
     return false;
 }
 
+/* Parse raw text content from a DOM text node into word tokens.
+ *
+ * Implements HTML whitespace collapsing: leading and trailing spaces set the
+ * `space_after` flag on surrounding tokens, and consecutive interior spaces
+ * are collapsed into a single word boundary. */
 static void parse_text_node(ParseContext *ctx, const char *text) {
     if (!text || !*text) return;
 
+    /* Ensure we have an active block to receive words */
     if (!ctx->current_block) {
         ctx->current_block = create_block(ctx->doc, BLOCK_PARAGRAPH, 0, ctx->pending_anchor);
         ctx->pending_anchor = NULL;
@@ -91,7 +155,8 @@ static void parse_text_node(ParseContext *ctx, const char *text) {
     const char *p = text;
     size_t wlen = 0;
 
-    /* If text starts with whitespace and previous word exists, ensure space_after */
+    /* If text begins with whitespace and a preceding word exists in this block,
+     * mark that preceding word as followed by a space. */
     if (is_html_whitespace(p, &wlen)) {
         if (ctx->current_block->word_count > 0) {
             ctx->current_block->words[ctx->current_block->word_count - 1].space_after = true;
@@ -103,7 +168,7 @@ static void parse_text_node(ParseContext *ctx, const char *text) {
 
     char word_buf[4096];
     while (*p) {
-        /* Read next word */
+        /* Extract contiguous non-whitespace characters into word buffer */
         size_t b_idx = 0;
         while (*p && !is_html_whitespace(p, &wlen)) {
             if (b_idx + 1 < sizeof(word_buf)) {
@@ -113,6 +178,7 @@ static void parse_text_node(ParseContext *ctx, const char *text) {
         }
         word_buf[b_idx] = '\0';
 
+        /* If we extracted a valid word, check if trailing whitespace follows */
         if (b_idx > 0) {
             bool has_space = false;
             if (is_html_whitespace(p, &wlen)) {
@@ -126,6 +192,16 @@ static void parse_text_node(ParseContext *ctx, const char *text) {
     }
 }
 
+/* ==========================================================================
+ * Recursive DOM traversal
+ *
+ * Walks the libxml2 DOM tree, managing:
+ *   - Element styling (pushing/popping bold, italic, code styles).
+ *   - Block boundary creation (<p>, <h1>-<h6>, <blockquote>, <li>, <hr>).
+ *   - Anchor ID capture for Table of Contents navigation.
+ *   - Filtering of non-content elements (<script>, <style>, <head>, <svg>).
+ * ========================================================================== */
+
 static void traverse_dom(ParseContext *ctx, xmlNode *node) {
     for (xmlNode *cur = node; cur; cur = cur->next) {
         if (cur->type == XML_TEXT_NODE) {
@@ -135,7 +211,7 @@ static void traverse_dom(ParseContext *ctx, xmlNode *node) {
         } else if (cur->type == XML_ELEMENT_NODE) {
             const char *name = (const char *)cur->name;
 
-            /* Skip non-content head and script elements */
+            /* Filter out non-content head, script, and vector graphics elements */
             if (strcasecmp(name, "script") == 0 ||
                 strcasecmp(name, "style") == 0 ||
                 strcasecmp(name, "head") == 0 ||
@@ -144,7 +220,7 @@ static void traverse_dom(ParseContext *ctx, xmlNode *node) {
                 continue;
             }
 
-            /* Check for anchor ID / name */
+            /* Check for anchor target attribute (id or name) */
             xmlChar *id_attr = xmlGetProp(cur, (const xmlChar *)"id");
             if (!id_attr) {
                 id_attr = xmlGetProp(cur, (const xmlChar *)"name");
@@ -158,7 +234,7 @@ static void traverse_dom(ParseContext *ctx, xmlNode *node) {
                 xmlFree(id_attr);
             }
 
-            /* Check block elements */
+            /* Identify block elements */
             bool is_p = (strcasecmp(name, "p") == 0);
             bool is_h = (name[0] == 'h' || name[0] == 'H') && (name[1] >= '1' && name[1] <= '6') && name[2] == '\0';
             bool is_blockquote = (strcasecmp(name, "blockquote") == 0);
@@ -167,16 +243,16 @@ static void traverse_dom(ParseContext *ctx, xmlNode *node) {
             bool is_br = (strcasecmp(name, "br") == 0);
             bool is_pre = (strcasecmp(name, "pre") == 0);
 
+            /* Horizontal rule: create dedicated divider block */
             if (is_hr) {
-                /* Flush current block and add divider block */
                 ctx->current_block = create_block(ctx->doc, BLOCK_HR, 0, ctx->pending_anchor);
                 ctx->pending_anchor = NULL;
                 ctx->current_block = NULL;
                 continue;
             }
 
+            /* Line break (<br>): split into a fresh block */
             if (is_br) {
-                /* Line break within content: start a fresh paragraph block */
                 if (ctx->current_block && ctx->current_block->word_count > 0) {
                     ctx->current_block = create_block(ctx->doc, BLOCK_PARAGRAPH, 0, ctx->pending_anchor);
                     ctx->pending_anchor = NULL;
@@ -186,13 +262,13 @@ static void traverse_dom(ParseContext *ctx, xmlNode *node) {
 
             int prev_style = ctx->current_style;
 
+            /* Start new semantic block based on tag type */
             if (is_h) {
                 int level = name[1] - '0';
                 ctx->current_block = create_block(ctx->doc, BLOCK_HEADING, level, ctx->pending_anchor);
                 ctx->pending_anchor = NULL;
                 ctx->current_style |= STYLE_BOLD | STYLE_HEADING;
             } else if (is_p) {
-                /* Start a new paragraph block */
                 if (ctx->current_block && ctx->current_block->word_count > 0) {
                     ctx->current_block = create_block(ctx->doc, BLOCK_PARAGRAPH, 0, ctx->pending_anchor);
                     ctx->pending_anchor = NULL;
@@ -213,7 +289,7 @@ static void traverse_dom(ParseContext *ctx, xmlNode *node) {
                 ctx->current_style |= STYLE_CODE;
             }
 
-            /* Inline styles */
+            /* Apply inline text formatting styles */
             if (strcasecmp(name, "b") == 0 || strcasecmp(name, "strong") == 0) {
                 ctx->current_style |= STYLE_BOLD;
             } else if (strcasecmp(name, "i") == 0 || strcasecmp(name, "em") == 0) {
@@ -224,10 +300,10 @@ static void traverse_dom(ParseContext *ctx, xmlNode *node) {
                 ctx->current_style |= STYLE_CODE;
             }
 
-            /* Recurse into children */
+            /* Recurse into element children */
             traverse_dom(ctx, cur->children);
 
-            /* If this was a heading, synthesize section title from its words */
+            /* If exiting a heading block, synthesize a clean title string from words */
             if (is_h && ctx->current_block && ctx->current_block->type == BLOCK_HEADING) {
                 size_t total_len = 0;
                 for (size_t i = 0; i < ctx->current_block->word_count; i++) {
@@ -245,16 +321,21 @@ static void traverse_dom(ParseContext *ctx, xmlNode *node) {
                         ctx->doc->title = xstrdup(stitle);
                     }
                 }
-                /* End heading block */
+                /* Terminate heading block so following content starts fresh */
                 ctx->current_block = NULL;
             }
 
-            /* Restore style */
+            /* Restore previous inline style state */
             ctx->current_style = prev_style;
         }
     }
 }
 
+/* ==========================================================================
+ * High-level HTML parser entry point
+ * ========================================================================== */
+
+/* Parse raw XHTML chapter data into a structured ChapterDocument. */
 ChapterDocument *html_parse_chapter(const char *xhtml_data, size_t data_len,
                                     size_t spine_index, const char *href, const char *default_title) {
     if (!xhtml_data || data_len == 0) return NULL;
@@ -285,7 +366,7 @@ ChapterDocument *html_parse_chapter(const char *xhtml_data, size_t data_len,
 
     xmlFreeDoc(doc);
 
-    /* Discard completely empty blocks (except BLOCK_HR) */
+    /* Discard completely empty blocks (except BLOCK_HR which carries no words) */
     size_t valid_count = 0;
     for (size_t i = 0; i < ch->block_count; i++) {
         if (ch->blocks[i].type == BLOCK_HR || ch->blocks[i].word_count > 0) {
@@ -297,6 +378,7 @@ ChapterDocument *html_parse_chapter(const char *xhtml_data, size_t data_len,
     }
     ch->block_count = valid_count;
 
+    /* Ensure document has a display title */
     if (!ch->title) {
         ch->title = default_title ? xstrdup(default_title) : xstrdup("Chapter");
     }
@@ -304,6 +386,7 @@ ChapterDocument *html_parse_chapter(const char *xhtml_data, size_t data_len,
     return ch;
 }
 
+/* Free all resources associated with a ChapterDocument. */
 void chapter_document_free(ChapterDocument *doc) {
     if (!doc) return;
 

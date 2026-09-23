@@ -1,6 +1,31 @@
-/**
- * @file ui.c
- * @brief Terminal User Interface rendering, color schemes, and interactive dialogs.
+/* rr - Lightweight terminal EPUB reader
+ *
+ * Copyright (c) 2024, Usbo Kirishima <usbo at github>
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ *   * Redistributions of source code must retain the above copyright notice,
+ *     this list of conditions and the following disclaimer.
+ *   * Redistributions in binary form must reproduce the above copyright
+ *     notice, this list of conditions and the following disclaimer in the
+ *     documentation and/or other materials provided with the distribution.
+ *   * Neither the name of the copyright holder nor the names of its
+ *     contributors may be used to endorse or promote products derived from
+ *     this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #ifndef _XOPEN_SOURCE
@@ -20,6 +45,10 @@
 #include <curses.h>
 #include <locale.h>
 
+/* ==========================================================================
+ * Curses color pair identifiers
+ * ========================================================================== */
+
 #define PAIR_NORMAL   1
 #define PAIR_HEADER   2
 #define PAIR_FOOTER   3
@@ -37,6 +66,12 @@ static const char *THEME_NAMES[THEME_COUNT] = {
     "Nordic Slate"
 };
 
+/* ==========================================================================
+ * Curses initialization and teardown
+ * ========================================================================== */
+
+/* Initialize curses screen, enable wide characters, configure keypad and
+ * mouse capture, and set up default color definitions. */
 bool ui_init(void) {
     setlocale(LC_ALL, "");
     initscr();
@@ -45,7 +80,7 @@ bool ui_init(void) {
     keypad(stdscr, TRUE);
     curs_set(0);
 
-    /* Enable mouse scrolling & clicks */
+    /* Enable mouse click and wheel scrolling events */
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
 
     if (has_colors()) {
@@ -57,9 +92,24 @@ bool ui_init(void) {
     return true;
 }
 
+/* Restore the terminal to its original state prior to program exit. */
 void ui_cleanup(void) {
     endwin();
 }
+
+/* ==========================================================================
+ * Color palette and themes
+ *
+ * Provides five tuned reading atmospheres designed for prolonged eye comfort:
+ *
+ *   0. Minimalist / Clean: Default terminal foreground/background.
+ *   1. Warm Sepia: Soft amber/cream text on dark sepia background (Kindle aesthetic).
+ *   2. OLED Black: Maximum contrast true black (#000000) for OLED panels.
+ *   3. Forest Green: Relaxing vintage green phosphor monochrome.
+ *   4. Nordic Slate: Cool slate-blue tones with crisp arctic-white highlights.
+ *
+ * Falls back gracefully to standard 8 ANSI colors when 256 colors are unavailable.
+ * ========================================================================== */
 
 void ui_set_theme(int theme_index) {
     if (!has_colors()) return;
@@ -67,7 +117,7 @@ void ui_set_theme(int theme_index) {
     theme_index = (theme_index % THEME_COUNT + THEME_COUNT) % THEME_COUNT;
 
     if (theme_index == 0) {
-        /* Theme 0: Clean Minimalist */
+        /* Theme 0: Minimalist / Terminal Default */
         init_pair(PAIR_NORMAL, -1, -1);
         init_pair(PAIR_HEADER, COLOR_CYAN, -1);
         init_pair(PAIR_FOOTER, COLOR_WHITE, -1);
@@ -160,11 +210,13 @@ void ui_set_theme(int theme_index) {
     }
 }
 
+/* Retrieve the human-readable display name of a color scheme. */
 const char *ui_get_theme_name(int theme_index) {
     theme_index = (theme_index % THEME_COUNT + THEME_COUNT) % THEME_COUNT;
     return THEME_NAMES[theme_index];
 }
 
+/* Set a temporary toast notification message displayed in the status bar. */
 void ui_set_status(UIState *ui, const char *fmt, ...) {
     if (!ui) return;
     va_list args;
@@ -173,6 +225,15 @@ void ui_set_status(UIState *ui, const char *fmt, ...) {
     va_end(args);
     ui->status_ticks = 3;
 }
+
+/* ==========================================================================
+ * Box drawing and modal framing
+ *
+ * Draws elegant rounded boxes using Unicode box-drawing characters:
+ *   ╭───────╮
+ *   │ Title │
+ *   ╰───────╯
+ * ========================================================================== */
 
 static void draw_box(int y, int x, int h, int w, const char *title) {
     attron(COLOR_PAIR(PAIR_BORDER));
@@ -193,7 +254,7 @@ static void draw_box(int y, int x, int h, int w, const char *title) {
     for (int i = 1; i < w - 1; i++) addstr("─");
     addstr("╯");
 
-    /* Title */
+    /* Centered title header */
     if (title && *title) {
         char buf[128];
         snprintf(buf, sizeof(buf), " %s ", title);
@@ -209,6 +270,17 @@ static void draw_box(int y, int x, int h, int w, const char *title) {
     attroff(COLOR_PAIR(PAIR_BORDER));
 }
 
+/* ==========================================================================
+ * Main page rendering pass
+ *
+ * Coordinates screen composition:
+ *   1. Running header at row 0 (Book Title and Section Name).
+ *   2. Centered reading column from row 2 downward.
+ *   3. Ornamental scene breaks (─── ✦ ───).
+ *   4. Styled words with search highlights.
+ *   5. Footer at bottom row with pagination, progress, and clock.
+ * ========================================================================== */
+
 void ui_render(UIState *ui) {
     if (!ui || !ui->layout) return;
 
@@ -223,10 +295,11 @@ void ui_render(UIState *ui) {
     if (col_w > ui->term_w - 4) col_w = ui->term_w - 4;
     if (col_w < 30) col_w = ui->term_w;
 
+    /* Center reading column horizontally on screen */
     int margin_x = (ui->term_w - col_w) / 2;
     if (margin_x < 0) margin_x = 0;
 
-    /* 1. Header (Line 0) */
+    /* --- Step 1: Running Header (Line 0) --- */
     attron(COLOR_PAIR(PAIR_HEADER));
     int half_w = (col_w - 4) / 2;
     if (half_w < 10) half_w = 10;
@@ -236,8 +309,10 @@ void ui_render(UIState *ui) {
     utf8_truncate(ui->layout->book->title, half_w, book_title_buf, sizeof(book_title_buf));
     utf8_truncate(page->section_title ? page->section_title : "", half_w, sec_title_buf, sizeof(sec_title_buf));
 
+    /* Print book title on left side of text column */
     mvaddstr(0, margin_x, book_title_buf);
 
+    /* Print section/chapter title on right side of text column */
     int sec_w = utf8_strwidth(sec_title_buf);
     int sec_x = margin_x + col_w - sec_w;
     if (sec_x > margin_x + utf8_strwidth(book_title_buf) + 2) {
@@ -245,7 +320,7 @@ void ui_render(UIState *ui) {
     }
     attroff(COLOR_PAIR(PAIR_HEADER));
 
-    /* 2. Text Body (Lines 2 .. term_h - 3) */
+    /* --- Step 2: Typeset Text Body (Lines 2 .. term_h - 3) --- */
     int cur_y = 2;
     for (size_t i = 0; i < page->line_count && cur_y < ui->term_h - 2; i++) {
         const LayoutLine *line = &cl->lines[page->start_line + i];
@@ -255,6 +330,7 @@ void ui_render(UIState *ui) {
             continue;
         }
 
+        /* Thematic scene break divider */
         if (line->is_hr) {
             attron(COLOR_PAIR(PAIR_ACCENT));
             const char *ornament = "─── ✦ ───";
@@ -278,6 +354,7 @@ void ui_render(UIState *ui) {
 
         move(cur_y, start_x);
 
+        /* Print each word token with formatting and trailing spacing */
         for (int w = 0; w < line->word_count; w++) {
             Word *word = &line->words[w];
 
@@ -311,7 +388,7 @@ void ui_render(UIState *ui) {
                 attroff(COLOR_PAIR(pair) | attrs);
             }
 
-            /* Print trailing spaces */
+            /* Print inter-word spaces for this line */
             for (int s = 0; s < line->spaces_after[w]; s++) {
                 addch(' ');
             }
@@ -320,19 +397,19 @@ void ui_render(UIState *ui) {
         cur_y++;
     }
 
-    /* 3. Footer (Line term_h - 1) */
+    /* --- Step 3: Status Footer (Line term_h - 1) --- */
     int footer_y = ui->term_h - 1;
     attron(COLOR_PAIR(PAIR_FOOTER));
 
     if (ui->status_ticks > 0 && ui->status_msg[0] != '\0') {
-        /* Display toast status message centered */
+        /* Display centered toast status message */
         int sw = utf8_strwidth(ui->status_msg);
         int sx = (ui->term_w - sw) / 2;
         attron(COLOR_PAIR(PAIR_ACCENT) | A_BOLD);
         mvaddstr(footer_y, (sx > 0 ? sx : 0), ui->status_msg);
         attroff(COLOR_PAIR(PAIR_ACCENT) | A_BOLD);
     } else {
-        /* Left: Arrow indicators + Page count */
+        /* Left: Arrow indicators + Bookmark status + Page count */
         char left_footer[64];
         bool is_bm = state_has_bookmark(ui->state, ui->current_page);
         snprintf(left_footer, sizeof(left_footer), "%s%s Pag. %zu/%zu %s",
@@ -344,7 +421,7 @@ void ui_render(UIState *ui) {
 
         mvaddstr(footer_y, margin_x, left_footer);
 
-        /* Center: Reading percentage or search status */
+        /* Center: Reading progress percentage or active search index */
         if (ui->search_active && ui->match_count > 0) {
             char search_info[64];
             snprintf(search_info, sizeof(search_info), "[Match %zu of %zu]",
@@ -362,7 +439,7 @@ void ui_render(UIState *ui) {
             }
         }
 
-        /* Right: Live time (matching "2:34am" typography) */
+        /* Right: Live clock formatted as "2:34am" */
         char time_buf[32];
         get_current_time_str(time_buf, sizeof(time_buf));
         int tw = utf8_strwidth(time_buf);
@@ -376,6 +453,14 @@ void ui_render(UIState *ui) {
     refresh();
 }
 
+/* ==========================================================================
+ * Interactive modal dialogs
+ *
+ * Each modal runs an event sub-loop that renders an overlay box directly on
+ * top of the reading page.
+ * ========================================================================== */
+
+/* Display the Table of Contents modal selector. */
 size_t ui_show_toc_modal(UIState *ui) {
     if (!ui || !ui->layout || !ui->layout->book) return 0;
     const EpubBook *book = ui->layout->book;
@@ -392,7 +477,7 @@ size_t ui_show_toc_modal(UIState *ui) {
     int box_y = (ui->term_h - box_h) / 2;
     int box_x = (ui->term_w - box_w) / 2;
 
-    /* Find currently active TOC entry */
+    /* Pre-select the TOC entry closest to the current page */
     size_t selected = 0;
     for (size_t i = 0; i < book->toc_count; i++) {
         size_t p = layout_find_toc_page(ui->layout, &book->toc[i]);
@@ -414,13 +499,13 @@ size_t ui_show_toc_modal(UIState *ui) {
             scroll_offset = selected - (size_t)visible_items + 1;
         }
 
-        /* Redraw base reader screen behind modal */
+        /* Draw reading screen beneath modal overlay */
         ui_render(ui);
 
-        /* Draw modal box */
+        /* Draw modal container */
         draw_box(box_y, box_x, box_h, box_w, "Table of Contents");
 
-        /* Render items */
+        /* Render visible TOC entries */
         for (int i = 0; i < visible_items; i++) {
             size_t idx = scroll_offset + (size_t)i;
             int row_y = box_y + 2 + i;
@@ -446,13 +531,13 @@ size_t ui_show_toc_modal(UIState *ui) {
                 attron(COLOR_PAIR(PAIR_NORMAL));
             }
 
-            /* Clear row inside box */
+            /* Clear item row inside frame */
             mvprintw(row_y, box_x + 1, "%*s", box_w - 2, "");
 
             int text_x = box_x + 3 + (item->level * 2);
             mvprintw(row_y, text_x, "%s %s", is_sel ? "▶" : " ", title_trunc);
 
-            /* Fill with subtle dots towards page number */
+            /* Fill gap between title and page number with subtle dot leaders */
             int dots_start = text_x + 2 + utf8_strwidth(title_trunc) + 1;
             int dots_end = box_x + box_w - 3 - pw;
             for (int dx = dots_start; dx < dots_end; dx++) {
@@ -468,7 +553,7 @@ size_t ui_show_toc_modal(UIState *ui) {
             }
         }
 
-        /* Footer hint */
+        /* Footer navigation hint */
         attron(COLOR_PAIR(PAIR_FOOTER));
         const char *hint = "[↑/↓] Navigate  •  [Enter] Select  •  [Esc/q] Close";
         int hw = utf8_strwidth(hint);
@@ -481,7 +566,7 @@ size_t ui_show_toc_modal(UIState *ui) {
 
         int ch = getch();
         if (ch == 27 || ch == 'q' || ch == 'Q' || ch == 't' || ch == '\t') {
-            return 0; /* Cancelled */
+            return 0; /* Dismiss modal without jumping */
         } else if (ch == KEY_UP || ch == 'k') {
             if (selected > 0) selected--;
         } else if (ch == KEY_DOWN || ch == 'j') {
@@ -502,6 +587,7 @@ size_t ui_show_toc_modal(UIState *ui) {
     }
 }
 
+/* Display the Bookmarks management modal. */
 size_t ui_show_bookmarks_modal(UIState *ui) {
     if (!ui || !ui->state) return 0;
     BookState *st = ui->state;
@@ -573,6 +659,7 @@ size_t ui_show_bookmarks_modal(UIState *ui) {
     }
 }
 
+/* Display the keyboard controls and cheatsheet overlay. */
 void ui_show_help_modal(UIState *ui) {
     if (!ui) return;
 
@@ -633,6 +720,7 @@ void ui_show_help_modal(UIState *ui) {
     getch();
 }
 
+/* Prompt the user for a page number on the bottom row. */
 size_t ui_prompt_goto_page(UIState *ui) {
     if (!ui || !ui->layout) return 0;
 
@@ -665,6 +753,14 @@ size_t ui_prompt_goto_page(UIState *ui) {
     return (size_t)p;
 }
 
+/* ==========================================================================
+ * Search subsystem
+ *
+ * Scans every word of every formatted line across all chapters to find
+ * case-insensitive substring matches, then provides next/previous navigation.
+ * ========================================================================== */
+
+/* Prompt the user for a search query and index all occurrences across the book. */
 void ui_prompt_search(UIState *ui) {
     if (!ui || !ui->layout) return;
 
@@ -690,13 +786,13 @@ void ui_prompt_search(UIState *ui) {
 
     snprintf(ui->search_query, sizeof(ui->search_query), "%s", query);
 
-    /* Free previous matches */
+    /* Discard previous matches */
     free(ui->matches);
     ui->matches = NULL;
     ui->match_count = 0;
     ui->current_match_idx = 0;
 
-    /* Scan entire book layout for matches */
+    /* Scan all pages and lines across book */
     size_t cap = 0;
     for (size_t g_page = 1; g_page <= ui->layout->total_pages; g_page++) {
         const LayoutPage *lp = layout_get_page(ui->layout, g_page);
@@ -725,7 +821,7 @@ void ui_prompt_search(UIState *ui) {
 
     if (ui->match_count > 0) {
         ui->search_active = true;
-        /* Find first match on or after current page */
+        /* Jump to first match on or after current page */
         size_t best = 0;
         for (size_t i = 0; i < ui->match_count; i++) {
             if (ui->matches[i].global_page >= ui->current_page) {
@@ -742,12 +838,14 @@ void ui_prompt_search(UIState *ui) {
     }
 }
 
+/* Jump to the next search occurrence in the book. */
 void ui_search_next(UIState *ui) {
     if (!ui || !ui->search_active || ui->match_count == 0) return;
     ui->current_match_idx = (ui->current_match_idx + 1) % ui->match_count;
     ui->current_page = ui->matches[ui->current_match_idx].global_page;
 }
 
+/* Jump to the previous search occurrence in the book. */
 void ui_search_prev(UIState *ui) {
     if (!ui || !ui->search_active || ui->match_count == 0) return;
     if (ui->current_match_idx == 0) {
@@ -758,6 +856,7 @@ void ui_search_prev(UIState *ui) {
     ui->current_page = ui->matches[ui->current_match_idx].global_page;
 }
 
+/* Dismiss search mode and release memory for matches. */
 void ui_search_clear(UIState *ui) {
     if (!ui) return;
     ui->search_active = false;
