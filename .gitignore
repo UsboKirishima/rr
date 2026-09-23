@@ -29,6 +29,7 @@
 *.dylib
 
 # Executables
+/rr
 *.exe
 *.out
 *.app
@@ -53,3 +54,4 @@ dkms.conf
 
 # debug information files
 *.dwo
+test.epub
