@@ -236,7 +236,17 @@ void ui_set_status(UIState *ui, const char *fmt, ...) {
  * ========================================================================== */
 
 static void draw_box(int y, int x, int h, int w, const char *title) {
-    attron(COLOR_PAIR(PAIR_BORDER));
+    if (h < 2 || w < 2) return;
+
+    /* Fill interior with solid background so text underneath does not show through */
+    if (h > 2 && w > 2) {
+        attrset(COLOR_PAIR(PAIR_NORMAL));
+        for (int i = 1; i < h - 1; i++) {
+            mvprintw(y + i, x + 1, "%*s", w - 2, "");
+        }
+    }
+
+    attrset(COLOR_PAIR(PAIR_BORDER));
 
     /* Top border */
     mvaddstr(y, x, "╭");
@@ -256,18 +266,22 @@ static void draw_box(int y, int x, int h, int w, const char *title) {
 
     /* Centered title header */
     if (title && *title) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), " %s ", title);
-        int tw = utf8_strwidth(buf);
-        int tx = x + (w - tw) / 2;
-        if (tx > x) {
-            attron(COLOR_PAIR(PAIR_HEADER) | A_BOLD);
-            mvaddstr(y, tx, buf);
-            attroff(A_BOLD);
+        int avail = w - 4;
+        if (avail > 0) {
+            char title_trunc[128];
+            utf8_truncate(title, avail, title_trunc, sizeof(title_trunc));
+            char buf[140];
+            snprintf(buf, sizeof(buf), " %s ", title_trunc);
+            int tw = utf8_strwidth(buf);
+            int tx = x + (w - tw) / 2;
+            if (tx > x) {
+                attrset(COLOR_PAIR(PAIR_HEADER) | A_BOLD);
+                mvaddstr(y, tx, buf);
+            }
         }
     }
 
-    attroff(COLOR_PAIR(PAIR_BORDER));
+    attrset(COLOR_PAIR(PAIR_NORMAL));
 }
 
 /* ==========================================================================
@@ -526,9 +540,9 @@ size_t ui_show_toc_modal(UIState *ui) {
 
             bool is_sel = (idx == selected);
             if (is_sel) {
-                attron(COLOR_PAIR(PAIR_SELECTED) | A_BOLD);
+                attrset(COLOR_PAIR(PAIR_SELECTED) | A_BOLD);
             } else {
-                attron(COLOR_PAIR(PAIR_NORMAL));
+                attrset(COLOR_PAIR(PAIR_NORMAL));
             }
 
             /* Clear item row inside frame */
@@ -545,22 +559,18 @@ size_t ui_show_toc_modal(UIState *ui) {
             }
 
             mvaddstr(row_y, box_x + box_w - 2 - pw, page_str);
-
-            if (is_sel) {
-                attroff(COLOR_PAIR(PAIR_SELECTED) | A_BOLD);
-            } else {
-                attroff(COLOR_PAIR(PAIR_NORMAL));
-            }
         }
 
         /* Footer navigation hint */
-        attron(COLOR_PAIR(PAIR_FOOTER));
+        attrset(COLOR_PAIR(PAIR_FOOTER));
         const char *hint = "[↑/↓] Navigate  •  [Enter] Select  •  [Esc/q] Close";
-        int hw = utf8_strwidth(hint);
-        if (hw < box_w - 4) {
-            mvaddstr(box_y + box_h - 1, box_x + (box_w - hw) / 2, hint);
+        char hint_buf[128];
+        snprintf(hint_buf, sizeof(hint_buf), " %s ", hint);
+        int hw = utf8_strwidth(hint_buf);
+        if (hw < box_w - 2) {
+            mvaddstr(box_y + box_h - 1, box_x + (box_w - hw) / 2, hint_buf);
         }
-        attroff(COLOR_PAIR(PAIR_FOOTER));
+        attrset(COLOR_PAIR(PAIR_NORMAL));
 
         refresh();
 
@@ -601,41 +611,67 @@ size_t ui_show_bookmarks_modal(UIState *ui) {
     int box_x = (ui->term_w - box_w) / 2;
 
     size_t selected = 0;
+    size_t scroll_offset = 0;
+    int visible_items = box_h - 4;
+    if (visible_items < 1) visible_items = 1;
 
     while (true) {
+        if (selected < scroll_offset) {
+            scroll_offset = selected;
+        } else if (selected >= scroll_offset + (size_t)visible_items) {
+            scroll_offset = selected - (size_t)visible_items + 1;
+        }
+
         ui_render(ui);
         draw_box(box_y, box_x, box_h, box_w, "Bookmarks");
 
         if (st->bookmark_count == 0) {
-            attron(COLOR_PAIR(PAIR_FOOTER));
+            attrset(COLOR_PAIR(PAIR_FOOTER));
             const char *empty_msg = "No bookmarks yet. Press 'b' while reading to add one!";
-            mvaddstr(box_y + box_h / 2, box_x + (box_w - utf8_strwidth(empty_msg)) / 2, empty_msg);
-            attroff(COLOR_PAIR(PAIR_FOOTER));
+            int ew = utf8_strwidth(empty_msg);
+            int ex = box_x + (box_w - ew) / 2;
+            if (ex < box_x + 2) ex = box_x + 2;
+            mvaddstr(box_y + box_h / 2, ex, empty_msg);
         } else {
-            int visible_items = box_h - 4;
-            for (int i = 0; i < visible_items && (size_t)i < st->bookmark_count; i++) {
+            for (int i = 0; i < visible_items; i++) {
+                size_t idx = scroll_offset + (size_t)i;
+                if (idx >= st->bookmark_count) break;
+
                 int row_y = box_y + 2 + i;
-                size_t p = st->bookmarks[i];
+                size_t p = st->bookmarks[idx];
                 const LayoutPage *lp = layout_get_page(ui->layout, p);
 
-                bool is_sel = ((size_t)i == selected);
-                if (is_sel) attron(COLOR_PAIR(PAIR_SELECTED) | A_BOLD);
+                bool is_sel = (idx == selected);
+                if (is_sel) {
+                    attrset(COLOR_PAIR(PAIR_SELECTED) | A_BOLD);
+                } else {
+                    attrset(COLOR_PAIR(PAIR_NORMAL));
+                }
 
                 mvprintw(row_y, box_x + 1, "%*s", box_w - 2, "");
+
+                const char *sec_name = (lp && lp->section_title) ? lp->section_title : "Chapter";
+                int max_sec_w = box_w - 22;
+                if (max_sec_w < 8) max_sec_w = 8;
+                char sec_trunc[64];
+                utf8_truncate(sec_name, max_sec_w, sec_trunc, sizeof(sec_trunc));
+
                 mvprintw(row_y, box_x + 3, "%s ★ Pag. %3zu  -  %s",
                          is_sel ? "▶" : " ",
                          p,
-                         (lp && lp->section_title) ? lp->section_title : "Chapter");
-
-                if (is_sel) attroff(COLOR_PAIR(PAIR_SELECTED) | A_BOLD);
+                         sec_trunc);
             }
         }
 
-        attron(COLOR_PAIR(PAIR_FOOTER));
+        attrset(COLOR_PAIR(PAIR_FOOTER));
         const char *hint = "[Enter] Jump  •  [d] Delete  •  [Esc] Close";
-        int hw = utf8_strwidth(hint);
-        mvaddstr(box_y + box_h - 1, box_x + (box_w - hw) / 2, hint);
-        attroff(COLOR_PAIR(PAIR_FOOTER));
+        char hint_buf[128];
+        snprintf(hint_buf, sizeof(hint_buf), " %s ", hint);
+        int hw = utf8_strwidth(hint_buf);
+        if (hw < box_w - 2) {
+            mvaddstr(box_y + box_h - 1, box_x + (box_w - hw) / 2, hint_buf);
+        }
+        attrset(COLOR_PAIR(PAIR_NORMAL));
 
         refresh();
 
@@ -646,6 +682,16 @@ size_t ui_show_bookmarks_modal(UIState *ui) {
             if (selected > 0) selected--;
         } else if (ch == KEY_DOWN || ch == 'j') {
             if (st->bookmark_count > 0 && selected + 1 < st->bookmark_count) selected++;
+        } else if (ch == KEY_PPAGE) {
+            if (selected > (size_t)visible_items) selected -= (size_t)visible_items;
+            else selected = 0;
+        } else if (ch == KEY_NPAGE) {
+            selected += (size_t)visible_items;
+            if (selected >= st->bookmark_count) selected = st->bookmark_count > 0 ? st->bookmark_count - 1 : 0;
+        } else if (ch == KEY_HOME) {
+            selected = 0;
+        } else if (ch == KEY_END) {
+            selected = st->bookmark_count > 0 ? st->bookmark_count - 1 : 0;
         } else if (ch == 'd' || ch == 'D' || ch == KEY_DC) {
             if (st->bookmark_count > 0) {
                 state_toggle_bookmark(st, st->bookmarks[selected]);
@@ -690,7 +736,7 @@ void ui_show_help_modal(UIState *ui) {
         "",
         "DISPLAY & TYPOGRAPHY",
         "  w                           Cycle column width (margins)",
-        "  j                           Toggle full justification",
+        "  F / J                       Toggle full justification",
         "  p                           Toggle paragraph indent / spacing",
         "  c                           Cycle color theme",
         "",
@@ -703,18 +749,22 @@ void ui_show_help_modal(UIState *ui) {
         int y = box_y + 2 + (int)i;
         bool is_cat = (help_lines[i][0] != ' ' && help_lines[i][0] != '\0');
         if (is_cat) {
-            attron(COLOR_PAIR(PAIR_HEADER) | A_BOLD);
+            attrset(COLOR_PAIR(PAIR_HEADER) | A_BOLD);
         } else {
-            attron(COLOR_PAIR(PAIR_NORMAL));
+            attrset(COLOR_PAIR(PAIR_NORMAL));
         }
         mvaddstr(y, box_x + 4, help_lines[i]);
-        if (is_cat) attroff(COLOR_PAIR(PAIR_HEADER) | A_BOLD);
     }
 
-    attron(COLOR_PAIR(PAIR_FOOTER));
+    attrset(COLOR_PAIR(PAIR_FOOTER));
     const char *close_hint = "Press any key to return to reading";
-    mvaddstr(box_y + box_h - 1, box_x + (box_w - utf8_strwidth(close_hint)) / 2, close_hint);
-    attroff(COLOR_PAIR(PAIR_FOOTER));
+    char hint_buf[128];
+    snprintf(hint_buf, sizeof(hint_buf), " %s ", close_hint);
+    int hw = utf8_strwidth(hint_buf);
+    if (hw < box_w - 2) {
+        mvaddstr(box_y + box_h - 1, box_x + (box_w - hw) / 2, hint_buf);
+    }
+    attrset(COLOR_PAIR(PAIR_NORMAL));
 
     refresh();
     getch();
@@ -725,14 +775,15 @@ size_t ui_prompt_goto_page(UIState *ui) {
     if (!ui || !ui->layout) return 0;
 
     int footer_y = ui->term_h - 1;
+    attrset(COLOR_PAIR(PAIR_FOOTER));
     move(footer_y, 0);
     clrtoeol();
 
     char prompt[64];
     snprintf(prompt, sizeof(prompt), "Go to page (1 - %zu): ", ui->layout->total_pages);
-    attron(COLOR_PAIR(PAIR_HEADER) | A_BOLD);
+    attrset(COLOR_PAIR(PAIR_HEADER) | A_BOLD);
     mvaddstr(footer_y, 2, prompt);
-    attroff(COLOR_PAIR(PAIR_HEADER) | A_BOLD);
+    attrset(COLOR_PAIR(PAIR_NORMAL));
 
     echo();
     curs_set(1);
@@ -765,12 +816,13 @@ void ui_prompt_search(UIState *ui) {
     if (!ui || !ui->layout) return;
 
     int footer_y = ui->term_h - 1;
+    attrset(COLOR_PAIR(PAIR_FOOTER));
     move(footer_y, 0);
     clrtoeol();
 
-    attron(COLOR_PAIR(PAIR_HEADER) | A_BOLD);
+    attrset(COLOR_PAIR(PAIR_HEADER) | A_BOLD);
     mvaddstr(footer_y, 2, "/ ");
-    attroff(COLOR_PAIR(PAIR_HEADER) | A_BOLD);
+    attrset(COLOR_PAIR(PAIR_NORMAL));
 
     echo();
     curs_set(1);
