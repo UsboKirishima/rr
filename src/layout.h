@@ -61,6 +61,12 @@
  *    Slices formatted lines into screen-height pages. Strips leading and
  *    trailing blank lines from pages and ensures headings are not stranded
  *    as single-line orphans at the bottom of a screen.
+ *
+ * 4. Title Pages:
+ *    Chapter and section titles are pulled out of the text flow and rendered
+ *    on a page of their own, so the prose is never interrupted by a title
+ *    wedged between two paragraphs. Pagination closes the running page, emits
+ *    the title page, and resumes the text on the next screen.
  * ========================================================================== */
 
 /* A single typeset line ready for direct rendering in the terminal.
@@ -80,12 +86,18 @@ typedef struct {
     bool is_hr;                /* True if visual thematic divider line */
     bool is_blank;             /* True if vertical spacing blank line */
     bool is_centered;          /* True if line content should be centered */
+    bool is_section_start;     /* True if line opens a titled section, whose
+                                * title is displayed on a dedicated page */
     int block_index;           /* Index of source block in ChapterDocument */
     const char *section_title; /* Active section title at this line position */
     const char *anchor_id;     /* HTML target anchor attached to line, or NULL */
 } LayoutLine;
 
-/* A single screen page containing a vertical slice of chapter lines. */
+/* A single screen page containing a vertical slice of chapter lines.
+ *
+ * A page is either a body page (a slice of `line_count` typeset lines) or a
+ * title page (`is_title_page`), which carries a chapter or section title and
+ * no typeset lines at all. */
 typedef struct {
     size_t start_line;         /* First line index within chapter's lines array */
     size_t line_count;         /* Number of lines displayed on this screen */
@@ -93,6 +105,8 @@ typedef struct {
     size_t page_in_chapter;    /* 1-based local page index within chapter */
     size_t global_page;        /* 1-based global page number across entire book */
     const char *section_title; /* Active section or chapter title for header */
+    bool is_title_page;        /* True for the chapter/section title page */
+    const char *anchor_id;     /* HTML anchor this page was opened for, or NULL */
 } LayoutPage;
 
 /* Formatted layout for an individual chapter. */
@@ -105,6 +119,7 @@ typedef struct {
     LayoutPage *pages;         /* Array of paginated screens */
     size_t page_count;         /* Total number of pages in chapter */
     size_t page_cap;           /* Allocated capacity of pages array */
+    const char *chapter_title; /* Title shown on the chapter's title page */
 } ChapterLayout;
 
 /* Master book layout encompassing all chapters and global navigation tables.

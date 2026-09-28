@@ -220,20 +220,6 @@ static void traverse_dom(ParseContext *ctx, xmlNode *node) {
                 continue;
             }
 
-            /* Check for anchor target attribute (id or name) */
-            xmlChar *id_attr = xmlGetProp(cur, (const xmlChar *)"id");
-            if (!id_attr) {
-                id_attr = xmlGetProp(cur, (const xmlChar *)"name");
-            }
-            if (id_attr) {
-                if (ctx->current_block && !ctx->current_block->anchor_id) {
-                    ctx->current_block->anchor_id = xstrdup((const char *)id_attr);
-                }
-                if (ctx->pending_anchor) free(ctx->pending_anchor);
-                ctx->pending_anchor = xstrdup((const char *)id_attr);
-                xmlFree(id_attr);
-            }
-
             /* Identify block elements */
             bool is_p = (strcasecmp(name, "p") == 0);
             bool is_h = (name[0] == 'h' || name[0] == 'H') && (name[1] >= '1' && name[1] <= '6') && name[2] == '\0';
@@ -242,6 +228,26 @@ static void traverse_dom(ParseContext *ctx, xmlNode *node) {
             bool is_hr = (strcasecmp(name, "hr") == 0);
             bool is_br = (strcasecmp(name, "br") == 0);
             bool is_pre = (strcasecmp(name, "pre") == 0);
+
+            /* Check for anchor target attribute (id or name) */
+            xmlChar *id_attr = xmlGetProp(cur, (const xmlChar *)"id");
+            if (!id_attr) {
+                id_attr = xmlGetProp(cur, (const xmlChar *)"name");
+            }
+            if (id_attr) {
+                /* A block element opens a fresh block below that inherits the
+                 * anchor, so only an anchor nested inside an already open
+                 * block (e.g. <a name> within a <p>) belongs to that block.
+                 * Attributing it to both would place a section one block
+                 * earlier than it appears in the text. */
+                bool opens_block = is_p || is_h || is_blockquote || is_li || is_pre || is_hr;
+                if (!opens_block && ctx->current_block && !ctx->current_block->anchor_id) {
+                    ctx->current_block->anchor_id = xstrdup((const char *)id_attr);
+                }
+                if (ctx->pending_anchor) free(ctx->pending_anchor);
+                ctx->pending_anchor = xstrdup((const char *)id_attr);
+                xmlFree(id_attr);
+            }
 
             /* Horizontal rule: create dedicated divider block */
             if (is_hr) {

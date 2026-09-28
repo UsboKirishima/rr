@@ -285,11 +285,105 @@ static void draw_box(int y, int x, int h, int w, const char *title) {
 }
 
 /* ==========================================================================
+ * Chapter and section title pages
+ *
+ * A title page holds a single chapter or section title on an otherwise empty
+ * screen: the title is word-wrapped to the reading column, set in the upper
+ * third of the page, and closed by the same scene-break ornament used inside
+ * the text. The text of the chapter always resumes on the following screen.
+ * ========================================================================== */
+
+/* Maximum number of screen rows a wrapped title may occupy. */
+#define TITLE_PAGE_MAX_ROWS 4
+
+/* Render a standalone title page for the given chapter or section.
+ *
+ * `margin_x` and `col_w` describe the centered reading column, matching the
+ * geometry used for body pages. */
+static void draw_title_page(UIState *ui, const LayoutPage *page, int margin_x, int col_w) {
+    const char *title = page->section_title;
+    if (!title || !*title) return;
+
+    /* Vertical space available between the running header and the footer */
+    int body_top = 2;
+    int body_rows = ui->term_h - 4;
+    if (body_rows < 1) return;
+
+    int wrap_w = col_w - 4;
+    if (wrap_w < 10) wrap_w = col_w;
+
+    int max_rows = body_rows - 2;
+    if (max_rows > TITLE_PAGE_MAX_ROWS) max_rows = TITLE_PAGE_MAX_ROWS;
+    if (max_rows < 1) max_rows = 1;
+
+    /* --- Word-wrap the title into screen lines that fit the column --- */
+    char rows[TITLE_PAGE_MAX_ROWS][512];
+    int row_w[TITLE_PAGE_MAX_ROWS];
+    int n_rows = 0;
+
+    const char *p = title;
+    while (*p && n_rows < max_rows) {
+        size_t o = 0;
+        rows[n_rows][0] = '\0';
+
+        while (*p) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p) break;
+
+            const char *word = p;
+            while (*p && *p != ' ' && *p != '\t') p++;
+            size_t wlen = (size_t)(p - word);
+
+            size_t need = o + (o > 0 ? 1 : 0) + wlen + 1;
+            if (need >= sizeof(rows[0])) {
+                if (o > 0) break;             /* row is full, continue below */
+                utf8_truncate(word, wrap_w, rows[n_rows], sizeof(rows[0]));
+                wlen = strlen(rows[n_rows]);  /* word alone exceeds the column */
+            } else {
+                if (o > 0) rows[n_rows][o++] = ' ';
+                memcpy(rows[n_rows] + o, word, wlen);
+                o += wlen;
+                rows[n_rows][o] = '\0';
+            }
+        }
+
+        row_w[n_rows] = utf8_strwidth(rows[n_rows]);
+        n_rows++;
+    }
+    if (n_rows == 0) return;
+
+    /* --- Place the title block in the upper third of the reading area --- */
+    int block_h = n_rows + 2; /* title rows, breathing space, ornament */
+    if (block_h > body_rows) block_h = body_rows;
+    int y = body_top + (body_rows - block_h) / 3;
+
+    attrset(COLOR_PAIR(PAIR_HEADING) | A_BOLD);
+    for (int i = 0; i < n_rows && y + i < ui->term_h - 2; i++) {
+        int x = margin_x + (col_w - row_w[i]) / 2;
+        if (x < margin_x) x = margin_x;
+        mvaddstr(y + i, x, rows[i]);
+    }
+
+    /* Close the title with the scene-break ornament */
+    int rule_y = y + n_rows + 1;
+    if (rule_y < ui->term_h - 2) {
+        attrset(COLOR_PAIR(PAIR_ACCENT));
+        const char *ornament = "─── ✦ ───";
+        int ow = utf8_strwidth(ornament);
+        int ox = margin_x + (col_w - ow) / 2;
+        if (ox < margin_x) ox = margin_x;
+        mvaddstr(rule_y, ox, ornament);
+    }
+
+    attrset(COLOR_PAIR(PAIR_NORMAL));
+}
+
+/* ==========================================================================
  * Main page rendering pass
  *
  * Coordinates screen composition:
  *   1. Running header at row 0 (Book Title and Section Name).
- *   2. Centered reading column from row 2 downward.
+ *   2. Centered reading column from row 2 downward, or a chapter title page.
  *   3. Ornamental scene breaks (─── ✦ ───).
  *   4. Styled words with search highlights.
  *   5. Footer at bottom row with pagination, progress, and clock.
@@ -326,89 +420,98 @@ void ui_render(UIState *ui) {
     /* Print book title on left side of text column */
     mvaddstr(0, margin_x, book_title_buf);
 
-    /* Print section/chapter title on right side of text column */
-    int sec_w = utf8_strwidth(sec_title_buf);
-    int sec_x = margin_x + col_w - sec_w;
-    if (sec_x > margin_x + utf8_strwidth(book_title_buf) + 2) {
-        mvaddstr(0, sec_x, sec_title_buf);
+    /* Print section/chapter title on right side of text column. On a title page
+     * it would only repeat the headline below, so it is left out there. */
+    if (!page->is_title_page) {
+        int sec_w = utf8_strwidth(sec_title_buf);
+        int sec_x = margin_x + col_w - sec_w;
+        if (sec_x > margin_x + utf8_strwidth(book_title_buf) + 2) {
+            mvaddstr(0, sec_x, sec_title_buf);
+        }
     }
     attroff(COLOR_PAIR(PAIR_HEADER));
 
-    /* --- Step 2: Typeset Text Body (Lines 2 .. term_h - 3) --- */
-    int cur_y = 2;
-    for (size_t i = 0; i < page->line_count && cur_y < ui->term_h - 2; i++) {
-        const LayoutLine *line = &cl->lines[page->start_line + i];
+    /* --- Step 2a: Chapter / Section Title Page (no typeset lines) --- */
+    if (page->is_title_page) {
+        draw_title_page(ui, page, margin_x, col_w);
 
-        if (line->is_blank) {
-            cur_y++;
-            continue;
-        }
+    /* --- Step 2b: Typeset Text Body (Lines 2 .. term_h - 3) --- */
+    } else {
+        int cur_y = 2;
+        for (size_t i = 0; i < page->line_count && cur_y < ui->term_h - 2; i++) {
+            const LayoutLine *line = &cl->lines[page->start_line + i];
 
-        /* Thematic scene break divider */
-        if (line->is_hr) {
-            attron(COLOR_PAIR(PAIR_ACCENT));
-            const char *ornament = "─── ✦ ───";
-            int ow = utf8_strwidth(ornament);
-            int ox = margin_x + (col_w - ow) / 2;
-            mvaddstr(cur_y, ox, ornament);
-            attroff(COLOR_PAIR(PAIR_ACCENT));
-            cur_y++;
-            continue;
-        }
-
-        int start_x = margin_x + line->indent_spaces;
-        if (line->is_centered) {
-            int line_w = line->indent_spaces;
-            for (int w = 0; w < line->word_count; w++) {
-                line_w += line->words[w].visual_width + line->spaces_after[w];
+            if (line->is_blank) {
+                cur_y++;
+                continue;
             }
-            start_x = margin_x + (col_w - line_w) / 2;
-            if (start_x < margin_x) start_x = margin_x;
-        }
 
-        move(cur_y, start_x);
+            /* Thematic scene break divider */
+            if (line->is_hr) {
+                attron(COLOR_PAIR(PAIR_ACCENT));
+                const char *ornament = "─── ✦ ───";
+                int ow = utf8_strwidth(ornament);
+                int ox = margin_x + (col_w - ow) / 2;
+                mvaddstr(cur_y, ox, ornament);
+                attroff(COLOR_PAIR(PAIR_ACCENT));
+                cur_y++;
+                continue;
+            }
 
-        /* Print each word token with formatting and trailing spacing */
-        for (int w = 0; w < line->word_count; w++) {
-            Word *word = &line->words[w];
+            int start_x = margin_x + line->indent_spaces;
+            if (line->is_centered) {
+                int line_w = line->indent_spaces;
+                for (int w = 0; w < line->word_count; w++) {
+                    line_w += line->words[w].visual_width + line->spaces_after[w];
+                }
+                start_x = margin_x + (col_w - line_w) / 2;
+                if (start_x < margin_x) start_x = margin_x;
+            }
 
-            /* Check search match highlight */
-            bool is_search_match = false;
-            if (ui->search_active && ui->search_query[0] != '\0') {
-                if (str_case_contains(word->text, ui->search_query)) {
-                    is_search_match = true;
+            move(cur_y, start_x);
+
+            /* Print each word token with formatting and trailing spacing */
+            for (int w = 0; w < line->word_count; w++) {
+                Word *word = &line->words[w];
+
+                /* Check search match highlight */
+                bool is_search_match = false;
+                if (ui->search_active && ui->search_query[0] != '\0') {
+                    if (str_case_contains(word->text, ui->search_query)) {
+                        is_search_match = true;
+                    }
+                }
+
+                int attrs = 0;
+                int pair = PAIR_NORMAL;
+
+                if (line->is_heading) {
+                    attrs |= A_BOLD;
+                    pair = PAIR_HEADING;
+                }
+                if (word->style & STYLE_BOLD) attrs |= A_BOLD;
+                if (word->style & STYLE_ITALIC) attrs |= A_DIM;
+                if (word->style & STYLE_UNDERLINE) attrs |= A_UNDERLINE;
+                if (word->style & STYLE_CODE) attrs |= A_REVERSE;
+
+                if (is_search_match) {
+                    attron(COLOR_PAIR(PAIR_SEARCH) | A_BOLD);
+                    addstr(word->text);
+                    attroff(COLOR_PAIR(PAIR_SEARCH) | A_BOLD);
+                } else {
+                    attron(COLOR_PAIR(pair) | attrs);
+                    addstr(word->text);
+                    attroff(COLOR_PAIR(pair) | attrs);
+                }
+
+                /* Print inter-word spaces for this line */
+                for (int s = 0; s < line->spaces_after[w]; s++) {
+                    addch(' ');
                 }
             }
 
-            int attrs = 0;
-            int pair = PAIR_NORMAL;
-
-            if (line->is_heading) {
-                attrs |= A_BOLD;
-                pair = PAIR_HEADING;
-            }
-            if (word->style & STYLE_BOLD) attrs |= A_BOLD;
-            if (word->style & STYLE_ITALIC) attrs |= A_DIM;
-            if (word->style & STYLE_UNDERLINE) attrs |= A_UNDERLINE;
-            if (word->style & STYLE_CODE) attrs |= A_REVERSE;
-
-            if (is_search_match) {
-                attron(COLOR_PAIR(PAIR_SEARCH) | A_BOLD);
-                addstr(word->text);
-                attroff(COLOR_PAIR(PAIR_SEARCH) | A_BOLD);
-            } else {
-                attron(COLOR_PAIR(pair) | attrs);
-                addstr(word->text);
-                attroff(COLOR_PAIR(pair) | attrs);
-            }
-
-            /* Print inter-word spaces for this line */
-            for (int s = 0; s < line->spaces_after[w]; s++) {
-                addch(' ');
-            }
+            cur_y++;
         }
-
-        cur_y++;
     }
 
     /* --- Step 3: Status Footer (Line term_h - 1) --- */

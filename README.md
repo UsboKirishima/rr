@@ -43,10 +43,11 @@ Il danno                                               Capitolo 3
   - True Unicode/UTF-8 awareness using `wcwidth` (proper display of Italian/accented characters, smart quotes, em-dashes, ellipses).
   - Formatting support: Headings, Bold, Italic, Underline, Code, Blockquotes, and scene break dividers (`─── ✦ ───`).
   - Toggle between classic first-line indent and modern paragraph spacing (`p`).
+  - **Chapter & section title pages**: every chapter and every table-of-contents section opens on its own screen carrying only the title, with the prose starting on the next screen. Duplicate title lines are lifted out of the text instead of interrupting it.
 - **Smooth Navigation with Arrows**:
   - `←` / `→` or `↑` / `↓` arrow keys to turn pages.
   - Classic e-reader keybindings (`Space`, `Backspace`, `Enter`, `h`, `j`, `k`, `l`, `Page Up`, `Page Down`).
-  - Chapter jumping with `[` and `]`.
+  - Chapter jumping with `[` and `]`, landing on the chapter's title page.
 - **Interactive Modals**:
   - **Table of Contents (`t` / `Tab`)**: Interactive hierarchical chapter selector with page numbers and anchor navigation.
   - **Search (`/`)**: Full-book case-insensitive search with highlighted occurrences and next/prev match (`n` / `N`).
@@ -107,7 +108,7 @@ rr book.epub
 # Open directly at a specific page
 rr book.epub -p 42
 
-# Open directly at a specific chapter (1-based)
+# Open directly at a specific chapter (1-based, on its title page)
 rr book.epub -c 3
 
 # View metadata and Table of Contents without launching TUI
@@ -123,7 +124,7 @@ rr --help
 | --- | --- |
 | `→` / `↓` / `Space` / `Enter` / `l` / `j` | Next page |
 | `←` / `↑` / `Backspace` / `h` / `k` | Previous page |
-| `]` / `[` | Next / Previous chapter |
+| `]` / `[` | Next / Previous chapter (lands on its title page) |
 | `Home` / `End` (or `G`) | First / Last page of book |
 | `t` / `Tab` | Table of Contents modal |
 | `/` | Search in book |
