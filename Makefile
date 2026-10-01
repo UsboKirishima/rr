@@ -18,6 +18,7 @@ BINDIR ?= $(PREFIX)/bin
 
 SRCS = rr.c \
        src/util.c \
+       src/css.c \
        src/epub.c \
        src/html.c \
        src/layout.c \
