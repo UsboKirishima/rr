@@ -54,4 +54,9 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# EPUBs used for local testing. Both are copies of published books, not source.
 test.epub
+# Matches the sample books by title so the rule does not depend on the
+# typographic quote in the Zeno filename.
+*Svevo*.epub
