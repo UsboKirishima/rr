@@ -1,6 +1,48 @@
+<div align="center">
+
 # rr
 
-> Lightweight, distraction-free, aesthetic terminal EPUB reader written in pure C.
+**A terminal EPUB reader that reads the book, not the archive.**
+
+`rr` is a distraction-free reader for EPUB, written in C99.
+It has no runtime, no plugin system, and no opinion about your terminal
+font.
+
+</div>
+
+---
+
+## The problem it solves
+
+Almost every EPUB you can download was produced by a conversion tool, and those
+tools do not mark chapter titles with `<h1>`. They emit an ordinary `<p>` and
+record the intent — *this one is a heading* — in the book's embedded CSS, then
+throw away a great deal of debris along the way: the book title stamped in the
+margin of all 300 pages, and a printed page number after every paragraph.
+
+Readers that only look at markup get those books wrong. No chapter titles, an
+empty table of contents, and the running head repeating until you stop reading.
+
+`rr` resolves the stylesheets. That single decision is what most of this
+program is about.
+
+## What it does with that
+
+- **Recovers chapter titles** from the typography the book itself specifies, and
+  gives each one an anchor so navigation can reach it.
+- **Builds a table of contents** when the book's own navigation is too thin to
+  be useful, merging in the original entries rather than discarding them. A book
+  with a good navigation file is left completely alone.
+- **Removes conversion debris** — folios and running heads — judged across the
+  whole book, not one chapter at a time.
+- **Caches what it parses.** Chapters and stylesheets are read once. A
+  780-page novel opens in about 30 ms; resizing after that is single-digit.
+
+Selector matching is deliberately conservative: anything more ambiguous than a
+single tag, class, or id is left alone rather than guessed at. A missed heading
+is a small gap. A false bold match on body text is wrong on every page.
+
+## Reading
 
 ```
 Il danno                                               Capitolo 3
@@ -16,7 +58,7 @@ Il danno                                               Capitolo 3
         dolcezza   ancora   attraente.  Due  uomini  molto
         intelligenti  l’avevano  sposata. La sua vivacità,
         la  sua  bellezza,  l’elegante  corpicino dovevano
-        aver  avuto,  in passato, il potere di abbagliare.
+        aver  avuto,  in passato, il potore di abbagliare.
         Il  suo  viso doveva essere passato dalla bellezza
         della  gioventù  alla  sua sbiadita versione degli
         anni più tardi senza l’autocoscienza o la saggezza
@@ -24,122 +66,95 @@ Il danno                                               Capitolo 3
         Era,  pensai, una donna non molto intelligente che
         non  era  mai  stata  all’altezza  dei suoi figli.
         Concepii  una  brusca  avversione per Aston, e non
-        trovai molto simpatico nemmeno il ritratto dipinto
-        da Elizabeth di Anna da bambina. Forse è quella la
+        trovai  molto simpatico  nemmeno  il ritratto dipinto
+        da Elizabeth  di Anna da bambina. Forse è quella la
         grande  forza di sua madre, pensai: suscita pietà.
         Mentre   continuava   a   chiacchierare,  scavando
         allegramente  sotto  i  piedi  di  sua figlia, era
-        Anna,  seduta in silenzio accanto a lei, che delle
+        Anna,  seduta in silenzio  accanto a lei, che delle
         due sembrava la più malevola.
 
 ← Pag. 130/344 →                    [ 38% ]                2:34am
 ```
 
-## Features
+## Details worth knowing
 
-- **Paperback Typography**:
-  - Full-justified text layout with alternating whitespace distribution to prevent vertical rivers.
-  - Centered reading column (adjustable margins and width).
-  - True Unicode/UTF-8 awareness using `wcwidth` (proper display of Italian/accented characters, smart quotes, em-dashes, ellipses).
-  - Formatting support: Headings, Bold, Italic, Underline, Code, Blockquotes, and scene break dividers (`─── ✦ ───`).
-  - Toggle between classic first-line indent and modern paragraph spacing (`p`).
-  - **Chapter & section title pages**: every chapter and every table-of-contents section opens on its own screen carrying only the title, with the prose starting on the next screen. Duplicate title lines are lifted out of the text instead of interrupting it.
-- **Smooth Navigation with Arrows**:
-  - `←` / `→` or `↑` / `↓` arrow keys to turn pages.
-  - Classic e-reader keybindings (`Space`, `Backspace`, `Enter`, `h`, `j`, `k`, `l`, `Page Up`, `Page Down`).
-  - Chapter jumping with `[` and `]`, landing on the chapter's title page.
-- **Interactive Modals**:
-  - **Table of Contents (`t` / `Tab`)**: Interactive hierarchical chapter selector with page numbers and anchor navigation.
-  - **Search (`/`)**: Full-book case-insensitive search with highlighted occurrences and next/prev match (`n` / `N`).
-  - **Bookmarks (`b` / `B`)**: Toggle bookmarks on current page and manage them in a dedicated list.
-  - **Jump to Page (`g`)**: Instant navigation to any global page number.
-  - **Cheatsheet (`?`)**: In-app keyboard reference overlay.
-- **5 Aesthetic Color Schemes (`c`)**:
-  - **Default / Clean**: Minimalist terminal colors.
-  - **Warm Sepia**: Soothing amber/cream on warm dark background (like Kindle/E-Ink).
-  - **OLED Black**: High contrast true-black theme.
-  - **Forest Green**: Restful vintage phosphor green.
-  - **Nordic Slate**: Deep slate blue with arctic white text.
-- **Persistent Reading State**:
-  - Automatically remembers the exact page, chapter, column width, justification preference, color theme, and bookmarks for every opened book (`~/.config/rr/state`).
-- **High Performance & Portability**:
-  - Written in clean, modular C99 with zero memory leaks.
-  - Blazing fast: parses entire books in milliseconds.
-  - Responsive terminal resizing (`KEY_RESIZE` / `SIGWINCH`).
+- **Justified text** with alternating whitespace distribution, so the column
+  has no vertical rivers running down it.
+- **Title pages.** Every chapter opens on its own screen carrying only its
+  title, with the prose beginning on the next. Duplicate title lines are lifted
+  out of the text rather than interrupting it.
+- **Unicode.** Cell widths come from `wcwidth`, so accented letters, smart
+  quotes, and em-dashes occupy the columns they actually occupy.
+- **Two paragraph styles.** Classic first-line indent (`p` toggles), and scene
+  breaks rendered as `─── ✦ ───`.
+- **Five themes** (`c`): Minimal, Warm Sepia, Pure Black, Forest Green, Nordic
+  Slate.
+- **Mouse.** Scroll and click work.
+- **Your place is kept** per book — page, column width, justification, theme,
+  and bookmarks — in `$XDG_CONFIG_HOME/rr/state`, or `~/.config/rr/state`.
+- **Responds to resizing** via `SIGWINCH` and reflows in place.
 
-## Dependencies
+## Install
 
-- A C99 compiler (`gcc` or `clang`)
-- `libzip`
-- `libxml-2.0`
-- `ncursesw`
+Needs a C99 compiler and three libraries: `libzip`, `libxml2`, `ncursesw`.
 
-On Arch Linux:
-```bash
+```sh
+# Arch
 sudo pacman -S libzip libxml2 ncurses
-```
 
-On Debian / Ubuntu:
-```bash
+# Debian / Ubuntu
 sudo apt install libzip-dev libxml2-dev libncursesw5-dev
 ```
 
-## Building & Installation
-
-```bash
-# Build the release binary
+```sh
 make
-
-# Install to /usr/local/bin (optional)
-sudo make install
+sudo make install      # optional, /usr/local/bin
 ```
 
-To build in debug mode with AddressSanitizer and UndefinedBehaviorSanitizer:
-```bash
-make debug
+`make debug` builds with AddressSanitizer and UndefinedBehaviorSanitizer.
+
+## Use
+
+```sh
+rr book.epub              # read
+rr book.epub -p 42        # open at a page
+rr book.epub -c 3         # open at a chapter
+rr --info book.epub       # metadata and contents, no TUI
 ```
 
-## Usage
+## Keys
 
-```bash
-# Open an EPUB book
-rr book.epub
-
-# Open directly at a specific page
-rr book.epub -p 42
-
-# Open directly at a specific chapter (1-based, on its title page)
-rr book.epub -c 3
-
-# View metadata and Table of Contents without launching TUI
-rr --info book.epub
-
-# Show help
-rr --help
-```
-
-## Controls
-
-| Key | Action |
+| | |
 | --- | --- |
-| `→` / `↓` / `Space` / `Enter` / `l` / `j` | Next page |
-| `←` / `↑` / `Backspace` / `h` / `k` | Previous page |
-| `]` / `[` | Next / Previous chapter (lands on its title page) |
-| `Home` / `End` (or `G`) | First / Last page of book |
-| `t` / `Tab` | Table of Contents modal |
-| `/` | Search in book |
-| `n` / `N` | Next / Previous search match |
-| `b` | Toggle bookmark on current page |
-| `B` | View bookmarks modal |
-| `g` | Jump to page number |
-| `w` | Cycle column width (50, 60, 66, 76, 86, Auto) |
-| `F` / `J` | Toggle full justification vs left-aligned |
-| `p` | Toggle paragraph indent vs blank line spacing |
-| `c` | Cycle color theme |
-| `?` / `F1` | Help cheatsheet |
-| `q` / `Esc` | Quit and save position |
-| `Mouse Wheel` / `Click` | Turn pages backward / forward |
+| `→` `↓` `Space` `Enter` `l` `j` | next page |
+| `←` `↑` `Backspace` `h` `k` | previous page |
+| `[` `]` | previous / next chapter |
+| `t` `Tab` | table of contents |
+| `/` `n` `N` | search, then step through matches |
+| `b` `B` | bookmark this page, list bookmarks |
+| `g` | jump to page |
+| `w` | column width |
+| `F` | justification |
+| `p` | indent or spacing |
+| `c` | theme |
+| `?` | keys |
+| `q` | quit |
 
-## License
+`?` inside the reader is always the shortest answer to this table.
 
-Apache License 2.0. See [LICENSE](LICENSE) for details.
+## Known limitations
+
+- Headings are inferred from styling, so a body paragraph that is both centred
+  and bold may be promoted to a heading. The error is visible but harmless; a
+  missed heading is not.
+- Extraction is not flow-aware, so a footnote interrupting a sentence reads as a
+  paragraph break.
+
+---
+
+<div align="center">
+
+Apache License 2.0 — see [LICENSE](LICENSE).
+
+</div>
