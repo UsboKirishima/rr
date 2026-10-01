@@ -31,7 +31,7 @@
 #ifndef RR_HTML_H
 #define RR_HTML_H
 
-#include "epub.h"
+#include "css.h"
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -49,6 +49,12 @@
  * This decomposition isolates XML/HTML parsing from the typesetting engine,
  * enabling fast, flexible re-wrapping when the user resizes the terminal or
  * alters margins.
+ *
+ * The parse also consults the book's stylesheets (see css.h). Real books mark
+ * their chapter titles with <p> plus a class such as `calibre2 { font-size:
+ * 1.25em }`, never with <h1>, so the typographic facts resolved from CSS are
+ * recorded alongside the markup and used to promote those paragraphs to
+ * headings once the whole block has been read.
  * ========================================================================== */
 
 /* Typography and styling bitmask flags applied to individual words. */
@@ -96,6 +102,14 @@ typedef struct {
     Word *words;         /* Array of word tokens */
     size_t word_count;   /* Number of words in this block */
     size_t word_cap;     /* Allocated capacity of words array */
+
+    /* Typographic evidence gathered from the book's stylesheets while the
+     * block was being read. These fields are what lets rr recognise a heading
+     * in a book that never used an <h1> tag; see html.h's module comment. */
+    bool css_heading;     /* Promoted from BLOCK_PARAGRAPH to BLOCK_HEADING */
+    bool css_page_break;  /* The element requested a break before it */
+    bool css_centered;    /* Some element inside the block centres its text */
+    float css_font_ratio; /* Largest font-size multiplier inside the block */
 } Block;
 
 /* In-memory parsed representation of an entire EPUB chapter document. */
@@ -118,11 +132,60 @@ typedef struct {
  * whitespace, applies inline typography styles, captures anchor IDs, and
  * filters out non-content elements (scripts, styles, SVGs).
  *
+ * `css` may be NULL, in which case only presentational markup (<b>, <i>, <h1>
+ * ...) is honoured. When it is supplied, the book's stylesheets decide which
+ * paragraphs are really headings, which words are really bold, and where the
+ * original page breaks fell.
+ *
+ * This function does structural work only. It does NOT run
+ * html_prune_document_noise or html_classify_headings, because both are
+ * whole-book decisions that the caller must make in order, after every spine
+ * document has been read. See html_classify_headings for why the order is not
+ * interchangeable.
+ *
  * On success, returns an allocated ChapterDocument pointer.
  * On failure, returns NULL. */
 ChapterDocument *html_parse_chapter(const char *xhtml_data, size_t data_len,
                                     size_t spine_index, const char *href,
-                                    const char *default_title);
+                                    const char *default_title, const CssIndex *css);
+
+/* Promote paragraphs that the stylesheets mark as display type to headings.
+ *
+ * A converted book almost never tags its chapter titles with <h1>; it styles
+ * an ordinary <p> instead. This pass is where rr recovers the intent: a short
+ * paragraph that is bold throughout - or set in a larger, centred face - is
+ * reclassified as a heading, given a synthetic anchor so that table of contents
+ * navigation can reach it, and given a title synthesized from its own words.
+ *
+ * ORDERING IS PART OF THE CONTRACT. This must run after
+ * html_prune_document_noise, never before. These converters write a running
+ * head in exactly the same markup as a chapter title - a bold span in the body
+ * face - so the two are separable only by the repetition that pruning
+ * measures. Worse, promoting a running head would give it a synthetic anchor,
+ * and an anchored block is one that pruning deliberately spares. Classifying
+ * first would make the noise untouchable.
+ *
+ * Safe to call more than once; already-promoted blocks are left alone. */
+void html_classify_headings(ChapterDocument *doc);
+
+/* Strip conversion debris from a whole book: printed page numbers and running
+ * heads (the book title repeated in the margin of every page).
+ *
+ * Both artefacts are indistinguishable from prose when a single chapter is
+ * read on its own, so the decision needs the whole book as evidence: a short
+ * paragraph only counts as a running head once it recurs many times, and a
+ * paragraph only loses a trailing number once the book is known to carry
+ * folios at all. Blocks that carry a navigation anchor are never removed.
+ *
+ * Must run before html_classify_headings: see the note there. */
+void html_prune_document_noise(ChapterDocument **docs, size_t doc_count);
+
+/* Choose the chapter's displayed title once noise has been pruned.
+ *
+ * Prefers the first surviving heading's text, so a chapter is named after the
+ * title printed in it rather than after its position in the archive, and falls
+ * back to `default_title` for spine items with no headings of their own. */
+void html_finalize_title(ChapterDocument *doc, const char *default_title);
 
 /* Release all memory associated with a ChapterDocument, including all its
  * child blocks, words, text buffers, and anchor strings. */
