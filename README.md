@@ -12,7 +12,7 @@ font.
 
 ---
 
-## The problem it solves
+## The problem it solves 
 
 Almost every EPUB you can download was produced by a conversion tool, and those
 tools do not mark chapter titles with `<h1>`. They emit an ordinary `<p>` and
