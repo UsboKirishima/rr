@@ -217,6 +217,41 @@ static bool parse_container_xml(EpubBook *book, char **out_error) {
 }
 
 /* ==========================================================================
+ * Stylesheet compilation
+ *
+ * A book decides what is a heading almost entirely in CSS, so rr compiles
+ * every stylesheet the manifest declares before it reads a single chapter.
+ * Compiling is cheap: the rules are indexed by class, id and tag name, so
+ * resolving one element later costs a handful of hash lookups rather than a
+ * scan of the sheet.
+ *
+ * Stylesheets are loaded in manifest order, which is the author's declared
+ * preference order and matches how a browser would apply them.
+ * ========================================================================== */
+
+/* Compile every `text/css` resource listed in the manifest into `book->css`.
+ *
+ * A stylesheet that fails to read is skipped rather than treated as fatal: a
+ * broken asset must never stop a book from opening. */
+static void load_stylesheets(EpubBook *book) {
+    book->css = css_index_new();
+    if (!book->css) return;
+
+    for (size_t i = 0; i < book->manifest_count; i++) {
+        EpubItem *item = &book->manifest[i];
+        if (!item->media_type || strcmp(item->media_type, "text/css") != 0) continue;
+        if (!item->full_path) continue;
+
+        size_t size = 0;
+        char *data = epub_read_entry(book, item->full_path, &size);
+        if (!data) continue;
+
+        css_index_load(book->css, data, size);
+        free(data);
+    }
+}
+
+/* ==========================================================================
  * OPF package document parser
  *
  * The OPF file defines the structure of the publication:
@@ -422,6 +457,10 @@ static bool parse_opf_document(EpubBook *book, char **out_error) {
     if (!book->title) book->title = xstrdup("Untitled");
     if (!book->author) book->author = xstrdup("Unknown Author");
     if (!book->language) book->language = xstrdup("en");
+
+    /* Compile the book's stylesheets now, while the manifest is in hand.
+     * Chapter parsing depends on them, and it happens later and repeatedly. */
+    load_stylesheets(book);
 
     return true;
 }
@@ -646,6 +685,203 @@ const char *epub_get_chapter_title_for_spine(EpubBook *book, size_t spine_index)
 }
 
 /* ==========================================================================
+ * Reading cache construction
+ *
+ * Everything expensive about opening a book happens exactly once, here:
+ * stylesheets are compiled, each spine document is parsed into semantic
+ * blocks, conversion debris is removed, and a table of contents is derived
+ * from the headings when the book does not supply a usable one.
+ *
+ * The reader rebuilds its whole layout on every resize, margin change or
+ * typography toggle. Typesetting is cheap; re-parsing an entire novel from
+ * XHTML is not. Caching the parsed documents is therefore the difference
+ * between a resize that is instant and one that visibly stalls.
+ * ========================================================================== */
+
+/* Report how many spine documents the book's own navigation actually names.
+ *
+ * A navigation document that mentions one document out of eleven is not a
+ * table of contents; it is a stray bookmark. The count decides whether the
+ * detected headings are allowed to stand in for it. */
+static size_t count_toc_spine_coverage(const EpubBook *book) {
+    bool *covered = (bool *)xcalloc(book->spine_count ? book->spine_count : 1, sizeof(bool));
+    for (size_t i = 0; i < book->toc_count; i++) {
+        int s = book->toc[i].spine_index;
+        if (s >= 0 && (size_t)s < book->spine_count) covered[s] = true;
+    }
+
+    size_t n = 0;
+    for (size_t i = 0; i < book->spine_count; i++) {
+        if (covered[i]) n++;
+    }
+    free(covered);
+    return n;
+}
+
+/* Replace the book's table of contents with one built from detected headings.
+ *
+ * Some books - typically those produced by scanning and re-converting a printed
+ * edition - ship an NCX containing a single entry, or none at all, while the
+ * text itself carries a clear hierarchy of titles. Since those titles have
+ * already been recovered from the stylesheets, the honest table of contents is
+ * the one that lists them.
+ *
+ * The book's existing navigation is not thrown away but for the one entry that
+ * makes it useless: entries that name a spine document the detected headings
+ * do not cover are kept, so a partial navigation still contributes what it
+ * knows. */
+static void synthesize_toc_from_headings(EpubBook *book) {
+    EpubTocItem *synthesized = NULL;
+    size_t synth_count = 0;
+    int play_order = 0;
+
+    for (size_t s = 0; s < book->spine_count; s++) {
+        const ChapterDocument *doc = book->docs ? book->docs[s] : NULL;
+        if (!doc) continue;
+
+        for (size_t b = 0; b < doc->block_count; b++) {
+            const Block *blk = &doc->blocks[b];
+            if (blk->type != BLOCK_HEADING) continue;
+            if (!blk->section_title || !*blk->section_title) continue;
+
+            const char *path = book->spine[s].item ? book->spine[s].item->full_path : NULL;
+            synthesized = (EpubTocItem *)xrealloc(synthesized,
+                                                  (synth_count + 1) * sizeof(EpubTocItem));
+            EpubTocItem *it = &synthesized[synth_count++];
+            memset(it, 0, sizeof(EpubTocItem));
+            it->title = xstrdup(blk->section_title);
+            str_trim(it->title);
+            it->href = xstrdup(path ? path : "");
+            it->full_path = xstrdup(path ? path : "");
+            it->anchor = blk->anchor_id ? xstrdup(blk->anchor_id) : NULL;
+            it->level = (blk->heading_level > 0 ? blk->heading_level : 2) - 1;
+            it->spine_index = (int)s;
+            it->play_order = play_order++;
+        }
+    }
+
+    if (synth_count == 0) {
+        free(synthesized);
+        return;
+    }
+
+    /* Splice the existing navigation into the synthesized list, keeping only
+     * entries that are not already represented by a detected heading. */
+    EpubTocItem *merged = (EpubTocItem *)xcalloc(synth_count + book->toc_count, sizeof(EpubTocItem));
+    size_t merged_count = 0;
+
+    for (size_t i = 0; i < synth_count; i++) {
+        merged[merged_count++] = synthesized[i];
+    }
+
+    for (size_t i = 0; i < book->toc_count; i++) {
+        const EpubTocItem *old = &book->toc[i];
+        bool duplicate = false;
+        for (size_t j = 0; j < synth_count; j++) {
+            if (merged[j].spine_index == old->spine_index &&
+                strcmp(merged[j].title, old->title) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+
+        EpubTocItem copy = *old;
+        copy.title = xstrdup(old->title);
+        copy.href = xstrdup(old->href ? old->href : "");
+        copy.full_path = xstrdup(old->full_path ? old->full_path : "");
+        copy.anchor = old->anchor ? xstrdup(old->anchor) : NULL;
+        merged[merged_count++] = copy;
+    }
+
+    free(synthesized);
+    if (book->toc) {
+        for (size_t i = 0; i < book->toc_count; i++) {
+            free(book->toc[i].title);
+            free(book->toc[i].href);
+            free(book->toc[i].full_path);
+            free(book->toc[i].anchor);
+        }
+        free(book->toc);
+    }
+
+    book->toc = merged;
+    book->toc_count = merged_count;
+    resolve_toc_targets(book);
+}
+
+/* Build the reading cache: parse every spine document and repair navigation. */
+bool epub_load_documents(EpubBook *book) {
+    if (!book) return false;
+    if (book->docs_loaded) return true;
+    if (book->spine_count == 0) return false;
+
+    if (!book->css) book->css = css_index_new();
+
+    book->docs = (ChapterDocument **)xcalloc(book->spine_count, sizeof(ChapterDocument *));
+
+    for (size_t s = 0; s < book->spine_count; s++) {
+        const char *href = book->spine[s].item ? book->spine[s].item->href : NULL;
+        const char *def_title = epub_get_chapter_title_for_spine(book, s);
+
+        size_t size = 0;
+        char *data = epub_read_spine_item(book, s, &size);
+        if (data && size > 0) {
+            book->docs[s] = html_parse_chapter(data, size, s, href, def_title, book->css);
+            free(data);
+        }
+
+        if (!book->docs[s]) {
+            /* The chapter could not be parsed at all. An empty document keeps
+             * the spine and the layout arrays aligned. */
+            book->docs[s] = (ChapterDocument *)xcalloc(1, sizeof(ChapterDocument));
+            book->docs[s]->spine_index = s;
+            book->docs[s]->href = xstrdup(href ? href : "");
+            book->docs[s]->title = xstrdup(def_title);
+        }
+    }
+
+    /* Printed page numbers and running heads can only be recognised by looking
+     * at the whole book at once, so pruning happens only now that every
+     * document has been read. */
+    html_prune_document_noise(book->docs, book->spine_count);
+
+    /* Headings are classified only after the pruning above, never before. A
+     * converted book writes its running head in exactly the same markup as its
+     * chapter titles - a bold span in the body face - so the two can only be
+     * told apart by the repetition that pruning measures. Promoting a running
+     * head would additionally give it a synthetic anchor, and an anchored
+     * block is one that pruning deliberately spares. */
+    for (size_t s = 0; s < book->spine_count; s++) {
+        html_classify_headings(book->docs[s]);
+    }
+
+    /* Titles are chosen last of all, so that a running head never becomes the
+     * name of the chapter it was printed at the top of. */
+    for (size_t s = 0; s < book->spine_count; s++) {
+        html_finalize_title(book->docs[s], epub_get_chapter_title_for_spine(book, s));
+    }
+
+    /* A navigation document that names at most one spine item out of many is
+     * not describing this book. Rebuild it from the headings that were
+     * detected. */
+    size_t coverage = count_toc_spine_coverage(book);
+    if (book->spine_count >= 2 && coverage * 2 <= book->spine_count) {
+        synthesize_toc_from_headings(book);
+    }
+
+    book->docs_loaded = 1;
+    return true;
+}
+
+/* Borrow a spine document from the reading cache, loading it if necessary. */
+const ChapterDocument *epub_get_document(EpubBook *book, size_t spine_index) {
+    if (!book || spine_index >= book->spine_count) return NULL;
+    if (!book->docs_loaded) epub_load_documents(book);
+    return book->docs ? book->docs[spine_index] : NULL;
+}
+
+/* ==========================================================================
  * High-level public API
  * ========================================================================== */
 
@@ -738,6 +974,18 @@ void epub_close(EpubBook *book) {
         }
         free(book->toc);
     }
+
+    /* The parsed documents and the compiled rules are the last things to go:
+     * the layout holds pointers into them, so nothing that references the book
+     * may be freed before they are. */
+    if (book->docs) {
+        for (size_t i = 0; i < book->spine_count; i++) {
+            chapter_document_free(book->docs[i]);
+        }
+        free(book->docs);
+    }
+
+    css_index_free(book->css);
 
     if (book->za) {
         zip_close(book->za);

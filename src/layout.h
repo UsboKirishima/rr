@@ -109,17 +109,21 @@ typedef struct {
     const char *anchor_id;     /* HTML anchor this page was opened for, or NULL */
 } LayoutPage;
 
-/* Formatted layout for an individual chapter. */
+/* Formatted layout for an individual chapter.
+ *
+ * `doc` is borrowed, not owned: the parsed document lives in the book's reading
+ * cache and outlives every layout built from it. Typeset lines point straight
+ * into the document's word arrays, so the two must share a lifetime anyway. */
 typedef struct {
-    size_t chapter_index;      /* Spine sequence index */
-    ChapterDocument *doc;      /* Parsed semantic document for this chapter */
-    LayoutLine *lines;         /* Array of all typeset lines in chapter */
-    size_t line_count;         /* Total number of typeset lines */
-    size_t line_cap;           /* Allocated capacity of lines array */
-    LayoutPage *pages;         /* Array of paginated screens */
-    size_t page_count;         /* Total number of pages in chapter */
-    size_t page_cap;           /* Allocated capacity of pages array */
-    const char *chapter_title; /* Title shown on the chapter's title page */
+    size_t chapter_index;         /* Spine sequence index */
+    const ChapterDocument *doc;   /* Parsed semantic document for this chapter */
+    LayoutLine *lines;            /* Array of all typeset lines in chapter */
+    size_t line_count;            /* Total number of typeset lines */
+    size_t line_cap;              /* Allocated capacity of lines array */
+    LayoutPage *pages;            /* Array of paginated screens */
+    size_t page_count;            /* Total number of pages in chapter */
+    size_t page_cap;              /* Allocated capacity of pages array */
+    const char *chapter_title;    /* Title shown on the chapter's title page */
 } ChapterLayout;
 
 /* Master book layout encompassing all chapters and global navigation tables.

@@ -31,6 +31,8 @@
 #ifndef RR_EPUB_H
 #define RR_EPUB_H
 
+#include "css.h"
+#include "html.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <zip.h>
@@ -97,7 +99,13 @@ typedef struct {
 /* Master in-memory representation of an opened EPUB book.
  *
  * Holds the underlying zip archive handle, metadata, manifest items,
- * linear spine items, and parsed Table of Contents. */
+ * linear spine items, and parsed Table of Contents.
+ *
+ * The second half of the structure is the *reading cache*. Parsing a chapter
+ * costs far more than typesetting it, and the reader rebuilds the layout every
+ * time the terminal is resized or a typography setting is toggled, so the
+ * parsed documents and the compiled stylesheets are computed once and reused.
+ * That is what keeps a resize instantaneous on a full-length novel. */
 typedef struct {
     char *filepath;          /* Path to the .epub file on disk */
     char *file_id;           /* Persistent fingerprint for state tracking */
@@ -117,6 +125,11 @@ typedef struct {
     size_t toc_count;        /* Total number of TOC entries */
 
     zip_t *za;               /* Open libzip archive handle */
+
+    CssIndex *css;           /* Stylesheets compiled from every CSS resource */
+
+    ChapterDocument **docs;  /* Parsed spine documents, parallel to `spine` */
+    size_t docs_loaded;      /* Non-zero once the reading cache is built */
 } EpubBook;
 
 /* ==========================================================================
@@ -164,6 +177,34 @@ char *epub_read_spine_item(EpubBook *book, size_t spine_index, size_t *out_size)
  * document without a sub-anchor. If no exact match is found, falls back to
  * any TOC item matching this spine index, or returns a generic "Chapter" label. */
 const char *epub_get_chapter_title_for_spine(EpubBook *book, size_t spine_index);
+
+/* ==========================================================================
+ * Reading cache
+ * ========================================================================== */
+
+/* Parse the whole book once and keep the result for the reader's lifetime.
+ *
+ * Loading the book performs, in order:
+ *
+ *   1. Compiling every stylesheet listed in the manifest, so that heading and
+ *      emphasis decisions are made from the book's own typography.
+ *   2. Parsing each spine document into semantic blocks, resolving headings
+ *      from CSS, and stripping the printed page numbers and running heads that
+ *      conversion leaves behind.
+ *   3. Choosing each document's title and, if the book's own navigation is too
+ *      sparse to be useful, building a Table of Contents from the headings that
+ *      were detected.
+ *
+ * Everything above is idempotent: calling this a second time does nothing, so
+ * callers need not track whether the cache is warm.
+ *
+ * Returns false only when the book has no readable spine at all, which
+ * epub_open has already rejected. */
+bool epub_load_documents(EpubBook *book);
+
+/* Borrow a spine document from the reading cache, loading it if necessary.
+ * The returned document is owned by the book and stays valid until epub_close. */
+const ChapterDocument *epub_get_document(EpubBook *book, size_t spine_index);
 
 /* Print book metadata and hierarchical Table of Contents to stdout.
  * Used by the '--info' command-line flag. */

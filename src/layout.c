@@ -372,7 +372,7 @@ static void flush_section_start(ChapterLayout *cl, bool *pending, size_t since) 
     *pending = false;
 }
 
-static void layout_chapter_blocks(ChapterLayout *cl, ChapterDocument *doc, const EpubBook *book,
+static void layout_chapter_blocks(ChapterLayout *cl, const ChapterDocument *doc, const EpubBook *book,
                                   int col_width, bool full_justify, int paragraph_style) {
     const char *current_section_title = cl->chapter_title;
 
@@ -385,7 +385,7 @@ static void layout_chapter_blocks(ChapterLayout *cl, ChapterDocument *doc, const
     const char *pending_anchor = NULL;
 
     for (size_t b_idx = 0; b_idx < doc->block_count; b_idx++) {
-        Block *b = &doc->blocks[b_idx];
+        const Block *b = &doc->blocks[b_idx];
 
         /* Locate the table of contents entry anchored to this block, if any */
         const char *toc_title = NULL;
@@ -424,8 +424,12 @@ static void layout_chapter_blocks(ChapterLayout *cl, ChapterDocument *doc, const
         if (b->word_count == 0) continue;
 
         /* A new section begins here: pagination will close the running page and
-         * give the section a title page before its first line of text. */
-        if (opens_section) {
+         * give the section a title page before its first line of text.
+         *
+         * A heading recovered from CSS opens a section even without a table of
+         * contents entry behind it. That is what lets a book with no usable
+         * navigation still present its chapters one screen at a time. */
+        if (opens_section || (b->type == BLOCK_HEADING && b->section_title)) {
             pending_section_start = true;
         }
 
@@ -711,6 +715,10 @@ BookLayout *layout_build(EpubBook *book, int col_width, int page_height,
                          bool full_justify, int paragraph_style) {
     if (!book) return NULL;
 
+    /* Ensure the reading cache is warm. Typesetting then reuses the parsed
+     * documents rather than reading and parsing the book again. */
+    epub_load_documents(book);
+
     BookLayout *bl = (BookLayout *)xcalloc(1, sizeof(BookLayout));
     bl->book = book;
     bl->column_width = col_width;
@@ -728,18 +736,12 @@ BookLayout *layout_build(EpubBook *book, int col_width, int page_height,
         ChapterLayout *cl = &bl->chapters[c];
         cl->chapter_index = c;
 
-        size_t sz = 0;
-        char *data = epub_read_spine_item(book, c, &sz);
-        const char *def_title = epub_get_chapter_title_for_spine(book, c);
-
-        if (data && sz > 0) {
-            cl->doc = html_parse_chapter(data, sz, c, book->spine[c].item->href, def_title);
-            free(data);
-        } else {
-            cl->doc = (ChapterDocument *)xcalloc(1, sizeof(ChapterDocument));
-            cl->doc->spine_index = c;
-            cl->doc->title = xstrdup(def_title);
-        }
+        /* Parse the chapter once, when the book is opened, and reuse the
+         * result. This layout rebuild runs on every resize and every
+         * typography toggle, so re-reading and re-parsing the whole novel here
+         * would make those interactions visibly slow. */
+        const ChapterDocument *doc = epub_get_document(book, c);
+        cl->doc = (ChapterDocument *)doc;
 
         cl->chapter_title = resolve_chapter_title(book, cl->doc, c);
 
@@ -784,9 +786,8 @@ void layout_free(BookLayout *layout) {
                 free(cl->lines);
             }
             free(cl->pages);
-            if (cl->doc) {
-                chapter_document_free(cl->doc);
-            }
+            /* `cl->doc` belongs to the book's reading cache and is released by
+             * epub_close, not here. The lines above point into it. */
         }
         free(layout->chapters);
     }

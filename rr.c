@@ -194,6 +194,18 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
+    /* Parse the whole book before anything else touches it.
+     *
+     * This compiles the book's stylesheets, reads every chapter out of the
+     * archive once, recovers headings the stylesheets describe rather than the
+     * markup, strips printed page numbers and running heads, and - when the
+     * book's own navigation is too sparse to be usable - builds a table of
+     * contents from the headings it found. Doing it here means `--info`
+     * reports the same navigation the reader will actually navigate by, and
+     * the interactive session starts with a warm cache so that the first
+     * render and every subsequent resize are cheap. */
+    epub_load_documents(book);
+
     /* Non-interactive info mode */
     if (info_only) {
         epub_print_info(book);
