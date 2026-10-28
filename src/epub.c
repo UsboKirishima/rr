@@ -660,7 +660,10 @@ static void generate_fallback_toc(EpubBook *book) {
     for (size_t i = 0; i < book->spine_count; i++) {
         char title[64];
         snprintf(title, sizeof(title), "Chapter %zu", i + 1);
-        add_toc_item(book, title, book->spine[i].item ? book->spine[i].item->href : "", 0, (int)i);
+        add_toc_item(book, title,
+                     (book->spine[i].item && book->spine[i].item->href)
+                         ? book->spine[i].item->href : "",
+                     0, (int)i);
         book->toc[book->toc_count - 1].spine_index = (int)i;
     }
 }

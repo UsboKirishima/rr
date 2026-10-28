@@ -471,8 +471,8 @@ static void layout_chapter_blocks(ChapterLayout *cl, const ChapterDocument *doc,
             int cur_w = 0;
             for (size_t w = 0; w < b->word_count; w++) {
                 int ww = b->words[w].visual_width;
-                int space = (w > (size_t)start_w) ? 1 : 0;
-                if (cur_w + space + ww > col_width && w > (size_t)start_w) {
+                int space = ((int)w > start_w) ? 1 : 0;
+                if (cur_w + space + ww > col_width && (int)w > start_w) {
                     int count = (int)(w - start_w);
                     add_typeset_line(cl, &b->words[start_w], count, 0, col_width,
                                      false, true, true, b->heading_level, center_heading,
@@ -530,9 +530,9 @@ static void layout_chapter_blocks(ChapterLayout *cl, const ChapterDocument *doc,
 
         for (size_t w = 0; w < b->word_count; w++) {
             int ww = b->words[w].visual_width;
-            int space = (w > (size_t)start_w) ? 1 : 0;
+            int space = ((int)w > start_w) ? 1 : 0;
 
-            if (cur_w + space + ww > col_width && w > (size_t)start_w) {
+            if (cur_w + space + ww > col_width && (int)w > start_w) {
                 int count = (int)(w - start_w);
                 int indent = (start_w == 0) ? first_line_indent : cont_line_indent;
                 add_typeset_line(cl, &b->words[start_w], count, indent, col_width,

@@ -429,11 +429,14 @@ static void traverse_dom(ParseContext *ctx, xmlNode *node) {
                 }
                 if (total_len > 0) {
                     char *stitle = (char *)xmalloc(total_len + 1);
-                    stitle[0] = '\0';
+                    size_t off = 0;
                     for (size_t i = 0; i < ctx->current_block->word_count; i++) {
-                        strcat(stitle, ctx->current_block->words[i].text);
-                        if (i + 1 < ctx->current_block->word_count) strcat(stitle, " ");
+                        size_t wl = strlen(ctx->current_block->words[i].text);
+                        memcpy(stitle + off, ctx->current_block->words[i].text, wl);
+                        off += wl;
+                        if (i + 1 < ctx->current_block->word_count) stitle[off++] = ' ';
                     }
+                    stitle[off] = '\0';
                     ctx->current_block->section_title = stitle;
                 }
                 /* Terminate heading block so following content starts fresh */
